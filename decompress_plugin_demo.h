@@ -39,7 +39,8 @@
 //  lzhamDecompressPlugin;
 //  tuzDecompressPlugin;
 
-// _bz2DecompressPlugin_unsz  : support for bspatch_with_cache()
+// _bz2DecompressPlugin_unsz   : support for bspatch_with_cache(), diffData created by bsdiff or "hdiffz -BSD ..."
+// _lzma2DecompressPlugin_unsz :only for test, support for bspatch_with_cache(), diffData compressed by lzma2 (lzma2CompressPlugin)
 // _7zXZDecompressPlugin      : support for vcpatch_with_cache(), diffData created by "xdelta3 -S lzma ..."
 // _7zXZDecompressPlugin_a    : support for vcpatch_with_cache(), diffData created by "hdiffz -VCD-compressLevel ..."
 #include <stdlib.h> //malloc free
@@ -889,8 +890,9 @@ static void __dec_free(void* _, void* address){
         free(self);
         return hpatch_TRUE;
     }
-    static hpatch_BOOL _lzma2_decompress_part(hpatch_decompressHandle decompressHandle,
-                                            unsigned char* out_part_data,unsigned char* out_part_data_end){
+    static hpatch_BOOL _lzma2_decompress_part_(hpatch_decompressHandle decompressHandle,
+                                               unsigned char* out_part_data,unsigned char* out_part_data_end,
+                                               hpatch_BOOL isMustOutData){
         _lzma2_TDecompress* self=(_lzma2_TDecompress*)decompressHandle;
         unsigned char* out_cur=out_part_data;
         assert(out_part_data<=out_part_data_end);
@@ -926,8 +928,14 @@ static void __dec_free(void* _, void* address){
                 res=Lzma2Dec_DecodeToDic(&self->decEnv,self->decEnv.decoder.dicBufSize,
                                         self->dec_buf+self->decReadPos,&inSize,LZMA_FINISH_ANY,&status);
                 if(res==SZ_OK){
-                    if ((inSize==0)&&(self->decEnv.decoder.dicPos==dicPos_back))
-                        _dec_onDecErr_rt();//error;
+                    if ((inSize==0)&&(self->decEnv.decoder.dicPos==dicPos_back)){
+                        if (isMustOutData){ //fill out 0
+                            memset(out_cur,0,out_part_data_end-out_cur);
+                            return hpatch_TRUE;
+                        }else{
+                            _dec_onDecErr_rt();//error;
+                        }
+                    }
                 }else{
                     _dec_onDecErr_rt();//error;
                 }
@@ -936,8 +944,23 @@ static void __dec_free(void* _, void* address){
         }
         return hpatch_TRUE;
     }
+
+    static hpatch_BOOL _lzma2_decompress_part(hpatch_decompressHandle decompressHandle,
+                                              unsigned char* out_part_data,unsigned char* out_part_data_end){
+        return _lzma2_decompress_part_(decompressHandle,out_part_data,out_part_data_end,hpatch_FALSE);
+    }
+    static hpatch_BOOL _lzma2_decompress_part_unsz(hpatch_decompressHandle decompressHandle,
+                                            unsigned char* out_part_data,unsigned char* out_part_data_end){
+        return _lzma2_decompress_part_(decompressHandle,out_part_data,out_part_data_end,hpatch_TRUE);
+    }
+
+
+
     static hpatch_TDecompress lzma2DecompressPlugin={_lzma2_is_can_open,_lzma2_open,
                                                     _lzma2_close,_lzma2_decompress_part};
+    //unkown uncompress data size
+    static hpatch_TDecompress _lzma2DecompressPlugin_unsz={_lzma2_is_can_open,_lzma2_open,
+                                                          _lzma2_close,_lzma2_decompress_part_unsz};
 #endif//_CompressPlugin_lzma2
 
 #ifdef _CompressPlugin_7zXZ
