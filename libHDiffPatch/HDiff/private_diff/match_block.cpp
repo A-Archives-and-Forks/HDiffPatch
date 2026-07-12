@@ -50,6 +50,7 @@ namespace hdiff_private {
     template<bool isNew> static 
     void _getPackedCovers(hpatch_StreamPos_t dataSize,const std::vector<TCover>& blockCovers,
                           std::vector<TPackedCover>& out_packedCovers){
+        out_packedCovers.clear();
         const hpatch_TCover* cover=blockCovers.data();
         const hpatch_TCover* cover_end=cover+blockCovers.size();
         hpatch_StreamPos_t dst=0;
@@ -77,20 +78,132 @@ namespace hdiff_private {
         //return dst;
     }
 
+TOldInvalidFilter::TOldInvalidFilter(const unsigned char* newData,const unsigned char* newData_end,
+                                     const hpatch_TStreamInput* oldStream,size_t _threadNum,
+                                     size_t _minOldInvalidSize,size_t _kBloomZoom,size_t _rollLen,
+                                     size_t _R,size_t _hitRateThreshold,size_t _cacheBlockSize)
+ :threadNum(_threadNum),minOldInvalidSize(_minOldInvalidSize),kBloomZoom(_kBloomZoom),rollLen(_rollLen),
+  R(_R),hitRateThreshold(_hitRateThreshold),cacheBlockSize(_cacheBlockSize),oldSize(oldStream?oldStream->streamSize:0){
+    if (((size_t)(newData_end-newData)>=rollLen)&&(oldSize>=rollLen)&&(minOldInvalidSize>0)){
+        bloomFilter.buildMatchCache(newData,newData_end,threadNum,kBloomZoom,rollLen);
+        _scanAndSmooth(oldStream);
+    }
+}
+
+void TOldInvalidFilter::_processHit(unsigned char hit,hpatch_StreamPos_t p,std::vector<unsigned char>& ring,
+                                    size_t& hitCount,hpatch_StreamPos_t& curInvalidStart){
+    const size_t kWin=R*2+1;
+    const size_t ri=(size_t)(p%kWin);
+    if (p<=R){
+        ring[kWin-1-ri]=hit;
+        ring[ri]=hit;
+        if (p==R){ //ring[0..R] filled now
+            hitCount=0;
+            for (size_t k=0;k<kWin;++k) hitCount+=ring[k];
+        }
+    }else{
+        const hpatch_StreamPos_t i=p-R-1;
+        _checkInvalid(i,hitCount,curInvalidStart);
+        hitCount+=(size_t)hit-ring[ri];
+        ring[ri]=hit;
+    }
+}
+
+void TOldInvalidFilter::_checkInvalid(hpatch_StreamPos_t i, size_t hitCount,hpatch_StreamPos_t& curInvalidStart){
+    const size_t kWin=R*2+1;
+    bool isInvalid=((hpatch_StreamPos_t)hitCount*256 < (hpatch_StreamPos_t)kWin*hitRateThreshold);
+    if (isInvalid){
+        if (curInvalidStart==hpatch_kNullStreamPos) curInvalidStart=(i>R)?i-R:0;
+    }else{
+        if (curInvalidStart!=hpatch_kNullStreamPos){
+            hdiff_TRange r={curInvalidStart,(hpatch_StreamPos_t)(i+R-1)};
+            if (r.endPos-r.beginPos>=minOldInvalidSize) invalidRanges.push_back(r);
+            curInvalidStart=hpatch_kNullStreamPos;
+        }
+    }
+}
+
+void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream){
+    if (oldSize<minOldInvalidSize) return;
+    if (oldSize<(R+1)) return;
+
+    const size_t kWin=R*2+1;
+    std::vector<unsigned char> ring(kWin,0);
+    size_t hitCount=0;
+    hpatch_StreamPos_t curInvalidStart=hpatch_kNullStreamPos;
+
+    size_t _cacheBlockSize=cacheBlockSize;
+    if (_cacheBlockSize<rollLen) _cacheBlockSize=rollLen;
+    cacheBlock.realloc(_cacheBlockSize+rollLen-1);
+
+    unsigned char* cache=cacheBlock.data();
+    hpatch_StreamPos_t curPos=0;
+    hpatch_StreamPos_t p=0;
+
+    while (curPos<oldSize){
+        unsigned char* readDst=(curPos==0)?cache:(cache+(rollLen-1));
+        size_t readLen=_cacheBlockSize;
+        if (curPos+readLen>oldSize) readLen=(size_t)(oldSize-curPos);
+        if (!oldStream->read(oldStream,curPos,readDst,readDst+readLen))
+            throw std::runtime_error("TOldInvalidFilter::_scanAndSmooth() oldStream read error!");
+
+        const size_t totalBytes=readDst+readLen-cache;
+        if (totalBytes<rollLen) break;
+
+        const unsigned char* cur=cache;
+        TFastMatchForSString::THash h=TFastMatchForSString::getHash(cur,rollLen);
+        _processHit((unsigned char)bloomFilter.isHit(h),p,ring,hitCount,curInvalidStart);
+        ++p;
+        cur+=rollLen;
+        for (size_t j=1;j<(totalBytes-rollLen+1);++j,++p,++cur){
+            h=TFastMatchForSString::rollHash(h,cur,rollLen);
+            _processHit((unsigned char)bloomFilter.isHit(h),p,ring,hitCount,curInvalidStart);
+        }
+
+        curPos+=readLen;
+        memmove(cache,cache+totalBytes-(rollLen-1),(rollLen-1));
+    }
+    for (;p<oldSize+R;++p){
+        const size_t ri=(size_t)(p%kWin);
+        _processHit(ring[ri],p,ring,hitCount,curInvalidStart);
+    }
+
+    if (curInvalidStart!=hpatch_kNullStreamPos){
+        hdiff_TRange r={curInvalidStart,oldSize};
+        if (r.endPos-r.beginPos>=minOldInvalidSize) invalidRanges.push_back(r);
+    }
+}
+
 void TMatchBlockMem::getBlockCovers(){
+    if (matchBlockSize==0) return;
     get_match_covers_by_stream(newData,newData_end,oldData,oldData_end,
                                blockCovers,matchBlockSize,threadNum);
 }
 
 void TMatchBlockStream::getBlockCovers(){
+    if (matchBlockSize==0) return;
     const hdiff_TMTSets_s mtsets={threadNum,threadNumForStream,false,false};
     get_match_covers_by_stream(newStream,oldStream,blockCovers,matchBlockSize,&mtsets);
 }
 
-void TMatchBlockBase::_getPackedCover(hpatch_StreamPos_t newDataSize,hpatch_StreamPos_t oldDataSize){
+
+void TMatchBlockBase::_getOldPackedCover(hpatch_StreamPos_t oldDataSize){
+    const size_t blockCount=blockCovers.size();
+    if (!invalidOldRanges.empty()){
+        //append invalidOldRanges as virtual covers with invalid newPos, to exclude them from packedCoversForOld
+        const hpatch_StreamPos_t kInvalidMaxNewPos=~(hpatch_StreamPos_t)0;
+        for (size_t i=0;i<invalidOldRanges.size();++i){
+            TCover c={invalidOldRanges[i].beginPos,kInvalidMaxNewPos,
+                      invalidOldRanges[i].endPos-invalidOldRanges[i].beginPos};
+            blockCovers.push_back(c);
+        }
+    }
     std::sort(blockCovers.begin(),blockCovers.end(),cover_cmp_by_old_t<hpatch_TCover>());
     _getPackedCovers<false>(oldDataSize,blockCovers,packedCoversForOld);
     std::sort(blockCovers.begin(),blockCovers.end(),cover_cmp_by_new_t<hpatch_TCover>());
+    blockCovers.resize(blockCount);
+}
+void TMatchBlockBase::_getNewPackedCover(hpatch_StreamPos_t newDataSize){
     _getPackedCovers<true>(newDataSize,blockCovers,packedCoversForNew);
 }
 
@@ -107,9 +220,19 @@ void TMatchBlockBase::_getPackedCover(hpatch_StreamPos_t newDataSize,hpatch_Stre
         return dst;
     }
 void TMatchBlockMem::packData(){
-    if (blockCovers.empty()) return;
-    oldData_end_cur=doPackData(oldData,oldData_end,packedCoversForOld);
+    _getNewPackedCover(newData_end-newData);
     newData_end_cur=doPackData(newData,newData_end,packedCoversForNew);
+
+    invalidOldRanges.clear();
+    if (isRemoveOldInvalid){
+        hpatch_TStreamInput oldStream;
+        mem_as_hStreamInput(&oldStream,oldData,oldData_end);
+        TOldInvalidFilter filter(newData,newData_end_cur,&oldStream,threadNum);
+        invalidOldRanges.swap(filter.getInvalidRanges());
+    }
+    _getOldPackedCover(oldData_end-oldData);
+    _clearV(invalidOldRanges);
+    oldData_end_cur=doPackData(oldData,oldData_end,packedCoversForOld);
 }
 
     static inline hpatch_StreamPos_t _getPackedSize(const std::vector<TPackedCover>& packedCovers){
@@ -129,32 +252,42 @@ void TMatchBlockMem::packData(){
         return true;
     }
 void TMatchBlockStream::packData(){
-    //load packed new & old data
-    const hpatch_StreamPos_t packedOldSize=_getPackedSize(packedCoversForOld);
+    _getNewPackedCover(newStream->streamSize);
     const hpatch_StreamPos_t packedNewSize=_getPackedSize(packedCoversForNew);
     _check(packedNewSize==(size_t)packedNewSize,"TMatchBlockStream::packData() packedNewSize");
-    if (packedOldSize) _check(packedNewSize+packedOldSize==(size_t)(packedNewSize+packedOldSize),"TMatchBlockStream::packData() packedOldSize");
-    _packedNewOldMem->realloc((size_t)(packedNewSize+packedOldSize));
-    oldData=_packedNewOldMem->data();
-    oldData_end_cur=oldData+packedOldSize;
-    newData=oldData_end_cur;
+    _packedNewMem.realloc((size_t)packedNewSize);
+    newData=_packedNewMem.data();
     newData_end_cur=newData+packedNewSize;
-    _out_diff_info("  load datas into memory from old & new ...\n");
-    _check(loadPackData(oldData,oldData_end_cur,oldStream,packedCoversForOld),"loadPackData(oldStream)");
+    _out_diff_info("  load new data into memory from new stream ...\n");
     _check(loadPackData(newData,newData_end_cur,newStream,packedCoversForNew),"loadPackData(newStream)");
+
+    invalidOldRanges.clear();
+    if (isRemoveOldInvalid){
+        TOldInvalidFilter filter(newData,newData_end_cur,oldStream,threadNum);
+        invalidOldRanges.swap(filter.getInvalidRanges());
+    }
+    _getOldPackedCover(oldStream->streamSize);
+    _clearV(invalidOldRanges);
+    const hpatch_StreamPos_t packedOldSize=_getPackedSize(packedCoversForOld);
+    if (packedOldSize) _check(packedOldSize==(size_t)packedOldSize,"TMatchBlockStream::packData() packedOldSize");
+    _packedOldMem.realloc((size_t)packedOldSize);
+    oldData=_packedOldMem.data();
+    oldData_end_cur=oldData+packedOldSize;
+    _out_diff_info("  load old data into memory from old stream ...\n");
+    _check(loadPackData(oldData,oldData_end_cur,oldStream,packedCoversForOld),"loadPackData(oldStream)");
 }
 
 TMatchBlockStream::TMatchBlockStream(const hpatch_TStreamInput* _newStream,const hpatch_TStreamInput* _oldStream,
-                                     size_t _matchBlockSize,size_t _threadNumForMem,size_t _threadNumForStream)
+                                     size_t _matchBlockSize,size_t _threadNumForMem,size_t _threadNumForStream,
+                                     bool _isRemoveOldInvalid)
 :TMatchBlockBase(_matchBlockSize,_threadNumForMem),
  newData(0),newData_end_cur(0),oldData(0),oldData_end_cur(0),newStream(_newStream),oldStream(_oldStream),
- threadNumForStream(_threadNumForStream),_newStreamMap(_newStream,packedCoversForNew),
- _oldStreamMap(_oldStream,packedCoversForOld),_packedNewOldMem(0),_isUnpacked(false){
+ threadNumForStream(_threadNumForStream),isRemoveOldInvalid(_isRemoveOldInvalid),
+ _newStreamMap(_newStream,packedCoversForNew),
+ _oldStreamMap(_oldStream,packedCoversForOld),_isUnpacked(false){
     assert(_oldStream);
-    _packedNewOldMem=new TAutoMem();
 }
 TMatchBlockStream::~TMatchBlockStream(){
-    if (_packedNewOldMem) delete _packedNewOldMem;
 }
 
     template<bool isNew> static 

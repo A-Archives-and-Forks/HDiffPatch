@@ -1362,7 +1362,8 @@ void get_match_covers_by_stream_and_sstring(const hpatch_TStreamInput* newData,c
                                             int kMinSingleMatchScore,bool isUseBigCacheMatch,const hdiff_TMTSets_s* mtsets,
                                             bool isExtendCover,TCachedNewOldStreams* out_cachedStreams){
     mtsets=mtsets?mtsets:&hdiff_TMTSets_s_kEmpty;
-    if (fastMatchBlockSize==0){
+    bool isRemoveOldInvalid=(fastMatchBlockSize>0)||isUseBigCacheMatch;
+    if ((fastMatchBlockSize==0)&&(!isRemoveOldInvalid)){
         TCachedNewOldStreams cachedStreams;
         cachedStreams.freeCached=_free_TCachedMemStreams;
         cachedStreams.import=new _TCachedMemStreams();
@@ -1386,7 +1387,8 @@ void get_match_covers_by_stream_and_sstring(const hpatch_TStreamInput* newData,c
 
     TCachedNewOldStreams cachedStreams;
     cachedStreams.freeCached=_free_TCoversOptimStream;
-    cachedStreams.import=new TCoversOptimStream(newData,oldData,fastMatchBlockSize,mtsets->threadNum,mtsets->threadNumForSearch);
+    cachedStreams.import=new TCoversOptimStream(newData,oldData,fastMatchBlockSize,mtsets->threadNum,
+                                                mtsets->threadNumForSearch,isRemoveOldInvalid);
     TCoversOptimStream& coversOp=*(TCoversOptimStream*)cachedStreams.import;
     get_match_covers_by_sstring(coversOp.matchBlock->newData,coversOp.matchBlock->newData_end_cur,
                                 coversOp.matchBlock->oldData,coversOp.matchBlock->oldData_end_cur,
@@ -1403,12 +1405,14 @@ void get_match_covers_by_stream_and_sstring(unsigned char* newData,unsigned char
                                             std::vector<TCover>& out_covers,size_t fastMatchBlockSize,
                                             int kMinSingleMatchScore,bool isUseBigCacheMatch,
                                             size_t threadNum,bool isExtendCover){
-    if (fastMatchBlockSize==0){
+    bool isRemoveOldInvalid=(fastMatchBlockSize>0)||isUseBigCacheMatch;
+    if ((fastMatchBlockSize==0)&&(!isRemoveOldInvalid)){
         get_match_covers_by_sstring(newData,newData_end,oldData,oldData_end,out_covers,
                                     kMinSingleMatchScore,isUseBigCacheMatch,threadNum,isExtendCover);
         return;
     }
-    TCoversOptimMem coversOp(newData,newData_end,oldData,oldData_end,fastMatchBlockSize,threadNum);
+    TCoversOptimMem coversOp(newData,newData_end,oldData,oldData_end,fastMatchBlockSize,
+                             threadNum,isRemoveOldInvalid);
     get_match_covers_by_sstring(coversOp.matchBlock->newData,coversOp.matchBlock->newData_end_cur,
                                 coversOp.matchBlock->oldData,coversOp.matchBlock->oldData_end_cur,
                                 out_covers,kMinSingleMatchScore,isUseBigCacheMatch,

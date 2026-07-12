@@ -28,23 +28,55 @@
 #ifndef hdiff_match_block_h
 #define hdiff_match_block_h
 #include "../diff_types.h"
+#include "suffix_string.h"
+#include "mem_buf.h"
 #include <vector>
 namespace hdiff_private{
-    struct TAutoMem;
-    
+
+    //identify large invalid regions in old data before diffing:
+    //build a bloom filter from new data's rolling hashes,
+    //stream old data positions against the filter through a small ring buffer,
+    //applying a sliding-window hit-rate threshold to output invalid ranges.
+    struct TOldInvalidFilter{
+        TOldInvalidFilter(const unsigned char* newData,const unsigned char* newData_end,
+                          const hpatch_TStreamInput* oldStream,size_t threadNum,
+                          size_t minOldInvalidSize=1024/2,size_t kBloomZoom=6,size_t rollLen=5,
+                          size_t R=32, size_t hitRateThreshold=64, //hitRateThreshold percent 0-256
+                          size_t cacheBlockSize=(1<<20)); //1MB
+        inline std::vector<hdiff_TRange>& getInvalidRanges(){ return invalidRanges; }
+    private:
+        void _scanAndSmooth(const hpatch_TStreamInput* oldStream);
+        void _checkInvalid(hpatch_StreamPos_t i, size_t hitCount,hpatch_StreamPos_t& curInvalidStart);
+        void _processHit(unsigned char hit,hpatch_StreamPos_t p,std::vector<unsigned char>& ring,
+                         size_t& hitCount,hpatch_StreamPos_t& curInvalidStart);
+        TFastMatchForSString       bloomFilter;
+        TAutoMem                   cacheBlock;     //cacheBlockSize+rollLen-1 bytes
+        std::vector<hdiff_TRange>  invalidRanges;
+        const size_t               threadNum;
+        const size_t               minOldInvalidSize;
+        const size_t               kBloomZoom;
+        const size_t               rollLen;
+        const size_t               R;
+        const size_t               hitRateThreshold; //percent 0-100
+        const size_t               cacheBlockSize;
+        hpatch_StreamPos_t         oldSize;
+    };
+
     struct TMatchBlockBase{
         typedef hpatch_TCover TPackedCover;
         TMatchBlockBase(size_t _matchBlockSize,size_t _threadNum)
         :matchBlockSize(_matchBlockSize),threadNum(_threadNum){}
 		inline void swapBlockCovers(std::vector<TCover>& _blockCovers){ blockCovers.swap(_blockCovers); }
     protected:
-        void _getPackedCover(hpatch_StreamPos_t newDataSize,hpatch_StreamPos_t oldDataSize);
+        void _getNewPackedCover(hpatch_StreamPos_t newDataSize);
+        void _getOldPackedCover(hpatch_StreamPos_t oldDataSize);
         void _unpackData(IDiffInsertCover* diffi,hpatch_TCover*& pcovers,size_t& coverCount);
         const size_t   matchBlockSize;
         const size_t   threadNum;
         std::vector<TCover> blockCovers;
         std::vector<TPackedCover> packedCoversForOld;
         std::vector<TPackedCover> packedCoversForNew;
+        std::vector<hdiff_TRange> invalidOldRanges;
     };
 
     //remove some big match block befor diff, in memory
@@ -55,16 +87,17 @@ namespace hdiff_private{
         unsigned char* oldData;
         unsigned char* oldData_end;
         unsigned char* oldData_end_cur;
+        const bool     isRemoveOldInvalid;
         TMatchBlockMem(unsigned char* _newData,unsigned char* _newData_end,
                        unsigned char* _oldData,unsigned char* _oldData_end,
-                       size_t _matchBlockSize,size_t _threadNumForMem)
+                       size_t _matchBlockSize,size_t _threadNumForMem,bool _isRemoveOldInvalid=false)
         :TMatchBlockBase(_matchBlockSize,_threadNumForMem),
          newData(_newData),newData_end(_newData_end),newData_end_cur(_newData_end),
-         oldData(_oldData),oldData_end(_oldData_end),oldData_end_cur(_oldData_end){ }
+         oldData(_oldData),oldData_end(_oldData_end),oldData_end_cur(_oldData_end),
+         isRemoveOldInvalid(_isRemoveOldInvalid){ }
         inline hpatch_StreamPos_t curNewDataSize()const{ return (size_t)(newData_end_cur-newData); }
         inline hpatch_StreamPos_t curOldDataSize()const{ return (size_t)(oldData_end_cur-oldData); }
         void getBlockCovers();
-        inline void getPackedCover() { _getPackedCover(newData_end-newData,oldData_end-oldData); }
         void packData();
         void unpackData(IDiffInsertCover* diffi,hpatch_TCover* pcovers,size_t coverCount);
     };
@@ -78,13 +111,14 @@ namespace hdiff_private{
         const hpatch_TStreamInput* newStream;
         const hpatch_TStreamInput* oldStream;
         const size_t    threadNumForStream;
+        const bool      isRemoveOldInvalid;
         TMatchBlockStream(const hpatch_TStreamInput* _newStream,const hpatch_TStreamInput* _oldStream,
-                          size_t _matchBlockSize,size_t _threadNumForMem,size_t _threadNumForStream);
+                          size_t _matchBlockSize,size_t _threadNumForMem,size_t _threadNumForStream,
+                          bool _isRemoveOldInvalid=false);
         ~TMatchBlockStream();
         inline hpatch_StreamPos_t curNewDataSize()const{ return _isUnpacked?newStream->streamSize:(size_t)(newData_end_cur-newData); }
         inline hpatch_StreamPos_t curOldDataSize()const{ return _isUnpacked?oldStream->streamSize:(size_t)(oldData_end_cur-oldData); }
         void getBlockCovers();
-        inline void getPackedCover() { _getPackedCover(newStream->streamSize,oldStream->streamSize); }
         void packData();
         void unpackData(IDiffInsertCover* diffi,hpatch_TCover* pcovers,size_t coverCount);
         void cachedStreams(const hpatch_TStreamInput** pnewData,const hpatch_TStreamInput** poldData);
@@ -101,7 +135,8 @@ namespace hdiff_private{
     protected:
         TStreamInputMap _newStreamMap;
         TStreamInputMap _oldStreamMap;
-        TAutoMem*       _packedNewOldMem;
+        TAutoMem        _packedNewMem;
+        TAutoMem        _packedOldMem;
         bool            _isUnpacked;
     };
 
@@ -130,11 +165,10 @@ namespace hdiff_private{
     struct TCoversOptimMem:public TCoversOptim<TMatchBlockMem>{
         TCoversOptimMem(unsigned char* newData,unsigned char* newData_end,
                        unsigned char* oldData,unsigned char* oldData_end,
-                       size_t matchBlockSize,size_t threadNum)
+                       size_t matchBlockSize,size_t threadNum,bool isRemoveOldInvalid=false)
         :TCoversOptim<TMatchBlockMem>(&_matchBlock),
-         _matchBlock(newData,newData_end,oldData,oldData_end,matchBlockSize,threadNum){
+         _matchBlock(newData,newData_end,oldData,oldData_end,matchBlockSize,threadNum,isRemoveOldInvalid){
             matchBlock->getBlockCovers();
-            matchBlock->getPackedCover();
             matchBlock->packData();
         }
     protected:
@@ -143,11 +177,11 @@ namespace hdiff_private{
 
     struct TCoversOptimStream:public TCoversOptim<TMatchBlockStream>{
         TCoversOptimStream(const hpatch_TStreamInput* newStream,const hpatch_TStreamInput* oldStream,
-                       size_t matchBlockSize,size_t threadNumForMem,size_t threadNumForStream)
+                       size_t matchBlockSize,size_t threadNumForMem,size_t threadNumForStream,
+                       bool isRemoveOldInvalid=false)
         :TCoversOptim<TMatchBlockStream>(&_matchBlock),
-         _matchBlock(newStream,oldStream,matchBlockSize,threadNumForMem,threadNumForStream){
+         _matchBlock(newStream,oldStream,matchBlockSize,threadNumForMem,threadNumForStream,isRemoveOldInvalid){
             matchBlock->getBlockCovers();
-            matchBlock->getPackedCover();
             matchBlock->packData();
         }
         inline void cachedStreams(const hpatch_TStreamInput** pnewData,const hpatch_TStreamInput** poldData){
@@ -164,7 +198,6 @@ namespace hdiff_private{
         :TCoversOptim<TMatchBlockMem>(&_matchBlock),
          _matchBlock(newData,newData_end,oldData,oldData_end,0,threadNum){
             matchBlock->swapBlockCovers(_blockCovers);//got blockCovers
-            matchBlock->getPackedCover();
             matchBlock->packData();
         }
     protected:
