@@ -39,25 +39,22 @@ namespace hdiff_private{
     //applying a sliding-window hit-rate threshold to output invalid ranges.
     struct TOldInvalidFilter{
         TOldInvalidFilter(const unsigned char* newData,const unsigned char* newData_end,
-                          const hpatch_TStreamInput* oldStream,size_t threadNum,
+                          const hpatch_TStreamInput* oldStream,const std::vector<TCover>& blockCovers,size_t threadNum,
                           size_t minOldInvalidSize=1024/2,size_t kBloomZoom=6,size_t rollLen=5,
                           size_t R=32, size_t hitRateThreshold=64, //hitRateThreshold percent 0-256
                           size_t cacheBlockSize=(1<<20)); //1MB
         inline std::vector<hdiff_TRange>& getInvalidRanges(){ return invalidRanges; }
     private:
         void _scanAndSmooth(const hpatch_TStreamInput* oldStream);
-        void _checkInvalid(hpatch_StreamPos_t i, size_t hitCount,hpatch_StreamPos_t& curInvalidStart);
-        void _processHit(unsigned char hit,hpatch_StreamPos_t p,std::vector<unsigned char>& ring,
-                         size_t& hitCount,hpatch_StreamPos_t& curInvalidStart);
         TFastMatchForSString       bloomFilter;
-        TAutoMem                   cacheBlock;     //cacheBlockSize+rollLen-1 bytes
         std::vector<hdiff_TRange>  invalidRanges;
+        std::vector<hdiff_TRange>  matchedRanges;
         const size_t               threadNum;
         const size_t               minOldInvalidSize;
         const size_t               kBloomZoom;
         const size_t               rollLen;
         const size_t               R;
-        const size_t               hitRateThreshold; //percent 0-100
+        const size_t               hitRateThreshold; //percent 0-256
         const size_t               cacheBlockSize;
         hpatch_StreamPos_t         oldSize;
     };
