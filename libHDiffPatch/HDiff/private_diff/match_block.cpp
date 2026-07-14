@@ -262,7 +262,7 @@ void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream,size
 
     const size_t kWin=R*2+1;
     size_t _cacheBlockSize=std::max(cacheBlockSize,std::max(rollLen*4,kWin));
-    _cacheBlockSize=std::min(_cacheBlockSize,oldSize);
+    _cacheBlockSize=(size_t)std::min((hpatch_StreamPos_t)_cacheBlockSize,oldSize);
 
     _TOldInvalidScanCtx ctx;
     ctx.oldStream         = oldStream;

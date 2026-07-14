@@ -37,15 +37,16 @@ void bz_internal_error(int errcode){
 
 int hpatchz(const char *oldFileName,const char *diffFileName,const char *outNewFileName,
             int64_t cacheMemory,size_t threadNum,hpatch_BOOL isChecksumNewData){
+    size_t dec_threadNum=1;//now only support lzma2 decompressor,& used large memory!
     TPatchChecksumSet checksumSet={0,hpatch_FALSE,isChecksumNewData,isChecksumNewData,hpatch_FALSE};
 #if (_IS_NEED_DIR_DIFF_PATCH)
     const hpatch_BOOL isDirDiff=getIsDirDiffFile(diffFileName);
     if (isDirDiff){
         return hpatch_dir(oldFileName,diffFileName,outNewFileName,
                           hpatch_FALSE,limitCacheMemory(cacheMemory),kMaxOpenFileNumber_default_patch,
-                          &checksumSet,&defaultPatchDirlistener,0,0,threadNum);
+                          &checksumSet,&defaultPatchDirlistener,0,0,threadNum,dec_threadNum);
     } else
 #endif
         return hpatch(oldFileName,diffFileName,outNewFileName,
-                      hpatch_FALSE,limitCacheMemory(cacheMemory),0,0,&checksumSet,threadNum);
+                      hpatch_FALSE,limitCacheMemory(cacheMemory),0,0,&checksumSet,threadNum,dec_threadNum);
 }

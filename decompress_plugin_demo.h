@@ -1009,7 +1009,7 @@ typedef struct _lzma2mt_TDecompress {
     CLzma2DecMtHandle       decMtHandle;
     CLzma2DecMtProps        mtProps;
     Byte                    propByte;
-    hpatch_StreamPos_t      dataSize;
+    UInt64                  dataSize;
     size_t                  threadNum;
     volatile hpatch_BOOL    isDecodeFinished;
     volatile hpatch_BOOL    isClosing;
@@ -1068,10 +1068,10 @@ static void _lzma2mt_decode_thread(int threadIndex, void* workData){
     _lzma2mt_TDecompress* self=(_lzma2mt_TDecompress*)workData;
     UInt64 inProcessed=0;
     int isMT=0;
-    const UInt64* outSizePtr=(self->dataSize>0)?&self->dataSize:NULL;
+    const UInt64* outSizePtr=(self->dataSize>0)?&self->dataSize:0;
     SRes res=Lzma2DecMt_Decode(self->decMtHandle,self->propByte,&self->mtProps,
                                &self->outStream.vt,outSizePtr,1,
-                               &self->inStream.vt,&inProcessed,&isMT,NULL);
+                               &self->inStream.vt,&inProcessed,&isMT,0);
     if ((res!=SZ_OK) && (!self->isClosing))
         self->decError=hpatch_dec_error;
     c_locker_enter(self->ring.locker);
