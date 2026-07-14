@@ -292,7 +292,7 @@ TInt TSuffixString::lower_bound(const TChar* str,const TChar* str_end)const{
 #if (_SSTRING_FAST_MATCH>0)
     #define kMinStrLen _SSTRING_FAST_MATCH
     assert((size_t)(str_end-str)>=kMinStrLen);
-    if (m_isUsedFastMatch&&(!m_fastMatch.isHit(TFastMatchForSString::getHash(str))))
+    if (m_isUsedFastMatch&&(!m_fastMatch.isHit(TFastMatchForSString::getHash(str,_SSTRING_FAST_MATCH))))
         return -1;
 #else
     //assert(str_end-str>=2);
@@ -337,7 +337,11 @@ void TSuffixString::clear_cache(){
 void TSuffixString::build_cache(size_t threadNum){
     clear_cache();
 #if (_SSTRING_FAST_MATCH>0)
-    if (m_isUsedFastMatch) m_fastMatch.buildMatchCache(m_src_begin,m_src_end,threadNum);
+    #define kFMZoom 4  //ctrl memory size & match speed
+    if (m_isUsedFastMatch){
+        //_out_diff_info("    build cache for sstring fast match ...\n");
+        m_fastMatch.buildMatchCache(m_src_begin,m_src_end,threadNum,kFMZoom,_SSTRING_FAST_MATCH);
+    }
 #endif
     const size_t kUsedCacheMinSASize =2*(1<<20); //Enable large cache table only when string is large.
     if (SASize()>kUsedCacheMinSASize){
@@ -370,14 +374,12 @@ void TSuffixString::build_cache(size_t threadNum){
 }
 
 
-#if (_SSTRING_FAST_MATCH>0)
-
     template<bool isMT>
     static void _filter_insert(TBloomFilter<TFastMatchForSString::THash>* filter,
-                               const TChar* src_begin,const TChar* src_end){
+                               const TChar* src_begin,const TChar* src_end,size_t kRollLen){
         const TChar* cur = src_begin;
-        TFastMatchForSString::THash h=TFastMatchForSString::getHash(cur);
-        cur+=TFastMatchForSString::kFMMinStrSize;
+        TFastMatchForSString::THash h=TFastMatchForSString::getHash(cur,kRollLen);
+        cur+=kRollLen;
         do {
     #if (_IS_USED_MULTITHREAD)
             if (isMT)
@@ -386,18 +388,18 @@ void TSuffixString::build_cache(size_t threadNum){
     #endif
                 filter->insert(h);
             if (cur<src_end)
-                h=TFastMatchForSString::rollHash(h,cur++);
+                h=TFastMatchForSString::rollHash(h,cur++,kRollLen);
             else
                 break;
         } while (true);
     }
 
-    void TFastMatchForSString::buildMatchCache(const TChar* src_begin,const TChar* src_end,size_t threadNum){
-        #define kFMZoom 4  //ctrl memory size & match speed
+    void TFastMatchForSString::buildMatchCache(const TChar* src_begin,const TChar* src_end,size_t threadNum,
+                                               size_t kBloomZoom,size_t kRollLen){
         size_t srcSize=src_end-src_begin;
-        if (srcSize>=kFMMinStrSize){
-            const size_t rollSize=srcSize-(kFMMinStrSize-1);
-            bf.init(rollSize,kFMZoom); //alloc large memory
+        if (srcSize>=kRollLen){
+            const size_t rollSize=srcSize-(kRollLen-1);
+            bf.init(rollSize,kBloomZoom); //alloc large memory
 #if (_IS_USED_MULTITHREAD)
             const size_t kInsertMinParallelSize=4096;
             if ((threadNum>1)&&(rollSize>=kInsertMinParallelSize)) {
@@ -408,21 +410,20 @@ void TSuffixString::build_cache(size_t threadNum){
                 const size_t threadCount=threadNum-1;
                 std::vector<std::thread> threads(threadCount);
                 for (size_t i=0;i<threadCount;i++,src_begin+=step)
-                    threads[i]=std::thread(_filter_insert<true>,&bf,src_begin,src_begin+step+(kFMMinStrSize-1));
-                _filter_insert<true>(&bf,src_begin,src_end);
+                    threads[i]=std::thread(_filter_insert<true>,&bf,src_begin,src_begin+step+(kRollLen-1),kRollLen);
+                _filter_insert<true>(&bf,src_begin,src_end,kRollLen);
                 for (size_t i=0;i<threadCount;i++)
                     threads[i].join();
             }else
 #endif
             {
-                _filter_insert<false>(&bf,src_begin,src_end);
+                _filter_insert<false>(&bf,src_begin,src_end,kRollLen);
             }
         }else if ((srcSize>0)||(src_begin!=0))
-            bf.init(0,kFMZoom);
+            bf.init(0,kBloomZoom);
         else{
             bf.clear();
         }
     }
-#endif
     
 }//namespace hdiff_private

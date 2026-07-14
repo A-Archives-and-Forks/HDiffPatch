@@ -30,6 +30,10 @@
 #include "mem_buf.h" //TAutoMem
 #include <algorithm>
 #include <stdexcept>  //std::runtime_error
+#include "../../../libParallel/parallel_channel.h"  //CHLocker, CAutoLocker
+#if (_IS_USED_MULTITHREAD)
+#include <thread>
+#endif
 #define _check(value,info) { if (!(value)) { throw std::runtime_error(info); } }
 
 namespace hdiff_private {
@@ -50,6 +54,7 @@ namespace hdiff_private {
     template<bool isNew> static 
     void _getPackedCovers(hpatch_StreamPos_t dataSize,const std::vector<TCover>& blockCovers,
                           std::vector<TPackedCover>& out_packedCovers){
+        out_packedCovers.clear();
         const hpatch_TCover* cover=blockCovers.data();
         const hpatch_TCover* cover_end=cover+blockCovers.size();
         hpatch_StreamPos_t dst=0;
@@ -77,20 +82,283 @@ namespace hdiff_private {
         //return dst;
     }
 
+
+    struct _range_less_by_begin_t{
+        inline bool operator()(const hdiff_TRange& a, const hdiff_TRange& b) const {
+            return a.beginPos < b.beginPos;
+        }
+    };
+
+    static void _toMatchedRanges(std::vector<hdiff_TRange>& matchedRanges,const std::vector<TCover>& blockCovers){
+        matchedRanges.resize(blockCovers.size());
+        for (size_t i=0;i<blockCovers.size();++i){
+            matchedRanges[i].beginPos=blockCovers[i].oldPos;
+            matchedRanges[i].endPos=blockCovers[i].oldPos+blockCovers[i].length;
+        }
+        if (matchedRanges.size()<=1) return;
+        std::sort(matchedRanges.begin(),matchedRanges.end(),_range_less_by_begin_t());
+        size_t backi=0;
+        for (size_t i=1;i<matchedRanges.size();++i){
+            if (matchedRanges[i].beginPos<=matchedRanges[backi].endPos)
+                matchedRanges[backi].endPos=std::max(matchedRanges[backi].endPos,matchedRanges[i].endPos);
+            else
+                matchedRanges[++backi]=matchedRanges[i];
+        }
+        matchedRanges.resize(backi+1);
+    }
+
+TOldInvalidFilter::TOldInvalidFilter(const unsigned char* newData,const unsigned char* newData_end,
+                                     const hpatch_TStreamInput* oldStream,const std::vector<TCover>& blockCovers,
+                                     size_t threadNum,bool oldDataIsMTSafe,
+                                     size_t _minOldInvalidSize,size_t _kBloomZoom,size_t _rollLen,
+                                     size_t _R,size_t _hitRateThreshold,size_t _cacheBlockSize)
+ :minOldInvalidSize(_minOldInvalidSize),kBloomZoom(_kBloomZoom),rollLen(_rollLen),
+  R(_R),hitRateThreshold(_hitRateThreshold),cacheBlockSize(_cacheBlockSize),oldSize(oldStream?oldStream->streamSize:0){
+    if (((size_t)(newData_end-newData)>=rollLen)&&(oldSize>=rollLen)&&(minOldInvalidSize>0)){
+        _out_diff_info("    build cache for resach invalid oldData ranges ...\n");
+        bloomFilter.buildMatchCache(newData,newData_end,threadNum,kBloomZoom,rollLen);
+        _toMatchedRanges(matchedRanges,blockCovers);
+        _out_diff_info("    find invalid oldData ranges for remove ...\n");
+        _scanAndSmooth(oldStream,threadNum,oldDataIsMTSafe);
+    }
+}
+
+struct _TOldInvalidScanCtx{
+    const hpatch_TStreamInput*        oldStream;
+    const TFastMatchForSString*       bloomFilter;
+    hpatch_StreamPos_t                oldSize;
+    size_t                            R,rollLen,hitRateThreshold,minOldInvalidSize,cacheBlockSize;
+    const std::vector<hdiff_TRange>*  matchedRanges;
+#if (_IS_USED_MULTITHREAD)
+    hpatch_StreamPos_t                nextPos;
+    size_t                            rangeIdx;
+    std::vector<hdiff_TRange>*        allInvalidRanges;
+    CHLocker                          taskLocker;
+    CHLocker                          mergeLocker;
+    CHLocker*                         readLocker;
+#endif
+};
+
+static bool _getNextScanTask(_TOldInvalidScanCtx& ctx,hpatch_StreamPos_t& _pos, size_t& _rangeIdx,
+                             hpatch_StreamPos_t& outBegin, hpatch_StreamPos_t& outEnd){
+    const std::vector<hdiff_TRange>& matchedRanges = *ctx.matchedRanges;
+    const size_t matchedRanges_size=matchedRanges.size();
+    hpatch_StreamPos_t pos = _pos;
+    size_t rangeIdx=_rangeIdx;
+    while (pos<ctx.oldSize){
+        while ((rangeIdx<matchedRanges_size)&&matchedRanges[rangeIdx].endPos<=pos)
+            ++rangeIdx;
+        if ((rangeIdx<matchedRanges_size)&&(pos>=matchedRanges[rangeIdx].beginPos)){
+            pos=matchedRanges[rangeIdx].endPos;
+            ++rangeIdx;
+        }
+        hpatch_StreamPos_t segEnd=(rangeIdx<matchedRanges_size)?matchedRanges[rangeIdx].beginPos:ctx.oldSize;
+        if (segEnd<pos+ctx.minOldInvalidSize){
+            pos=segEnd; continue;
+        }
+        hpatch_StreamPos_t segLen=std::min((hpatch_StreamPos_t)(segEnd-pos),(hpatch_StreamPos_t)ctx.cacheBlockSize);
+        outBegin = pos;
+        outEnd   = pos+segLen;
+        _pos     = outEnd;
+        _rangeIdx= rangeIdx;
+        return true;
+    }
+    _pos=pos;
+    return false;
+}
+
+    static void _processHitAndUpdateRing(const _TOldInvalidScanCtx& ctx,hpatch_StreamPos_t& curInvalidStart,size_t& hitCount,
+                                         unsigned char hit,hpatch_StreamPos_t curOldPos,hpatch_StreamPos_t segOldPos,
+                                         size_t R,unsigned char* ring,std::vector<hdiff_TRange>& localRanges){
+        const size_t kWin=R*2+1;
+        bool isInvalid = ((hpatch_StreamPos_t)hitCount*256 < (hpatch_StreamPos_t)kWin*ctx.hitRateThreshold);
+        if (isInvalid){
+            if (curInvalidStart==hpatch_kNullStreamPos)
+                curInvalidStart=curOldPos;
+        } else {
+            if (curInvalidStart!=hpatch_kNullStreamPos){
+                hdiff_TRange r={curInvalidStart,curOldPos};
+                if (((hpatch_StreamPos_t)(r.endPos-r.beginPos)>=ctx.minOldInvalidSize)||(curInvalidStart==segOldPos))
+                    localRanges.push_back(r);
+                curInvalidStart=hpatch_kNullStreamPos;
+            }
+        }
+        const size_t  ri =(size_t)((hpatch_StreamPos_t)(curOldPos-segOldPos+R+1)%kWin);
+        hitCount+= (size_t)hit - ring[ri];
+        ring[ri] = hit;
+    }
+
+static void _scanSegment(_TOldInvalidScanCtx& ctx,const unsigned char* buf, size_t bufSize,unsigned char* ring,
+                         hpatch_StreamPos_t segOldPos,std::vector<hdiff_TRange>& localRanges){
+    hpatch_StreamPos_t curOldPos=segOldPos;
+    const size_t R=ctx.R, rollLen=ctx.rollLen, kWin=R*2+1;
+    if (bufSize<rollLen+R) return;
+
+    hpatch_StreamPos_t          curInvalidStart=hpatch_kNullStreamPos;
+    const unsigned char*        cur=buf;
+    const unsigned char*        buf_end=buf+bufSize;
+    TFastMatchForSString::THash h=TFastMatchForSString::getHash(cur, rollLen);
+    ring[0] =(unsigned char)ctx.bloomFilter->isHit(h);
+    cur+=rollLen;
+    size_t hitCount=ring[0];
+    for (size_t ri=1; ri<=R; ++ri,++cur) {//front border
+        h=TFastMatchForSString::rollHash(h,cur,rollLen);
+        unsigned char hit=(unsigned char)ctx.bloomFilter->isHit(h);
+        ring[kWin-ri]=hit;
+        ring[ri]=hit;
+        hitCount+=hit*2;
+    }
+
+    for (;cur<buf_end;++cur,++curOldPos){
+        h=TFastMatchForSString::rollHash(h,cur,rollLen);
+        unsigned char hit=(unsigned char)ctx.bloomFilter->isHit(h);
+        _processHitAndUpdateRing(ctx,curInvalidStart,hitCount,hit,curOldPos,segOldPos,R,ring,localRanges);
+    }
+
+    {//back border
+        const size_t ri_last=(size_t)((hpatch_StreamPos_t)((curOldPos-1)-segOldPos+R+1)%kWin)+kWin;
+        for (size_t ri=ri_last-1;ri>=ri_last-R;--ri,++curOldPos){
+            unsigned char hit=ring[ri%kWin];
+            _processHitAndUpdateRing(ctx,curInvalidStart,hitCount,hit,curOldPos,segOldPos,R,ring,localRanges);
+        }
+    }
+    if (curInvalidStart!=hpatch_kNullStreamPos){//last invalid range
+        hdiff_TRange r = {curInvalidStart,segOldPos+bufSize};
+        localRanges.push_back(r);
+    }
+}
+
+#if (_IS_USED_MULTITHREAD)
+static void _scanWorker(_TOldInvalidScanCtx* ctx,unsigned char* buf){
+    std::vector<hdiff_TRange> localRanges;
+    localRanges.reserve(ctx->cacheBlockSize/(ctx->minOldInvalidSize*2));
+    while (true) {
+        hpatch_StreamPos_t taskBegin,taskEnd;
+        {
+            CAutoLocker _autoLocker(ctx->taskLocker);
+            if (!_getNextScanTask(*ctx,ctx->nextPos,ctx->rangeIdx,taskBegin,taskEnd))
+                break;
+        }
+        size_t segLen=(size_t)(taskEnd-taskBegin);
+        assert(segLen<=ctx->cacheBlockSize);
+        {
+            CAutoLocker _autoLocker(*ctx->readLocker);
+            if (!ctx->oldStream->read(ctx->oldStream, taskBegin,buf,buf+segLen))
+                throw std::runtime_error("TOldInvalidFilter::_scanWorker() oldStream read error!");
+        }
+        localRanges.clear();
+        _scanSegment(*ctx,buf,segLen,buf+segLen,taskBegin,localRanges);
+        if (!localRanges.empty()){
+            CAutoLocker _autoLocker(ctx->mergeLocker);
+            ctx->allInvalidRanges->insert(ctx->allInvalidRanges->end(),localRanges.begin(),localRanges.end());
+        }
+    }
+}
+#endif
+
+void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream,size_t threadNum,bool oldDataIsMTSafe){
+    if (oldSize<minOldInvalidSize) return;
+    if (oldSize<(R+1)) return;
+
+    const size_t kWin=R*2+1;
+    size_t _cacheBlockSize=std::max(cacheBlockSize,std::max(rollLen*4,kWin));
+    _cacheBlockSize=std::min(_cacheBlockSize,oldSize);
+
+    _TOldInvalidScanCtx ctx;
+    ctx.oldStream         = oldStream;
+    ctx.bloomFilter       = &bloomFilter;
+    ctx.oldSize           = oldSize;
+    ctx.R                 = R;
+    ctx.rollLen           = rollLen;
+    ctx.hitRateThreshold  = hitRateThreshold;
+    ctx.minOldInvalidSize = minOldInvalidSize;
+    ctx.cacheBlockSize    = _cacheBlockSize;
+    ctx.matchedRanges     = &matchedRanges;
+
+#if (_IS_USED_MULTITHREAD)
+    if ((threadNum>1) && (oldSize/2>=_cacheBlockSize)) {
+        while ((threadNum>2)&&(oldSize/threadNum<_cacheBlockSize)) --threadNum;
+        TAutoMem localCache((_cacheBlockSize+kWin)*threadNum);
+        CHLocker readLocker(!oldDataIsMTSafe);
+        ctx.readLocker        = &readLocker;
+        ctx.nextPos           = 0;
+        ctx.rangeIdx          = 0;
+        ctx.allInvalidRanges  = &invalidRanges;
+
+        const size_t workerCount = threadNum - 1;
+        std::vector<std::thread> threads(workerCount);
+        for (size_t i=0; i<workerCount;++i)
+            threads[i]=std::thread(_scanWorker,&ctx,localCache.data()+i*(_cacheBlockSize+kWin));
+        _scanWorker(&ctx,localCache.data()+workerCount*(_cacheBlockSize+kWin));
+        for (size_t i=0;i<workerCount;++i)
+            threads[i].join();
+    } else
+#endif
+    {
+        TAutoMem localCache(_cacheBlockSize+kWin);
+        unsigned char*      buf=localCache.data();
+        hpatch_StreamPos_t  pos=0;
+        size_t              rangeIdx=0;
+        hpatch_StreamPos_t  taskBegin,taskEnd;
+        while (_getNextScanTask(ctx,pos,rangeIdx,taskBegin,taskEnd)) {
+            size_t segLen = (size_t)(taskEnd-taskBegin);
+            assert(localCache.size()>=segLen);
+            if (!oldStream->read(oldStream,taskBegin,buf,buf+segLen))
+                throw std::runtime_error("TOldInvalidFilter::_scanAndSmooth() oldStream read error!");
+            _scanSegment(ctx,buf,segLen,buf+segLen,taskBegin,invalidRanges);
+        }
+    }
+
+    {
+        if (invalidRanges.size()>1){
+            std::sort(invalidRanges.begin(),invalidRanges.end(),_range_less_by_begin_t());
+            size_t backi=0;
+            for (size_t i=1;i<invalidRanges.size();++i){
+                if (invalidRanges[i].beginPos<invalidRanges[backi].endPos+rollLen)
+                    invalidRanges[backi].endPos=std::max(invalidRanges[backi].endPos,invalidRanges[i].endPos);
+                else
+                    invalidRanges[++backi]=invalidRanges[i];
+            }
+            invalidRanges.resize(backi+1);
+        }
+        size_t insert=0;
+        for (size_t i=0;i<invalidRanges.size();++i) {
+            if (invalidRanges[i].endPos-invalidRanges[i].beginPos>=minOldInvalidSize)
+                invalidRanges[insert++]=invalidRanges[i];
+        }
+        invalidRanges.resize(insert);
+    }
+}
+
 void TMatchBlockMem::getBlockCovers(){
+    if (matchBlockSize==0) return;
     get_match_covers_by_stream(newData,newData_end,oldData,oldData_end,
                                blockCovers,matchBlockSize,threadNum);
 }
 
 void TMatchBlockStream::getBlockCovers(){
-    const hdiff_TMTSets_s mtsets={threadNum,threadNumForStream,false,false};
+    if (matchBlockSize==0) return;
     get_match_covers_by_stream(newStream,oldStream,blockCovers,matchBlockSize,&mtsets);
 }
 
-void TMatchBlockBase::_getPackedCover(hpatch_StreamPos_t newDataSize,hpatch_StreamPos_t oldDataSize){
+
+void TMatchBlockBase::_getOldPackedCover(hpatch_StreamPos_t oldDataSize){
+    const size_t blockCount=blockCovers.size();
+    if (!invalidOldRanges.empty()){
+        //append invalidOldRanges as virtual covers with invalid newPos, to exclude them from packedCoversForOld
+        const hpatch_StreamPos_t kInvalidMaxNewPos=~(hpatch_StreamPos_t)0;
+        for (size_t i=0;i<invalidOldRanges.size();++i){
+            TCover c={invalidOldRanges[i].beginPos,kInvalidMaxNewPos,
+                      invalidOldRanges[i].endPos-invalidOldRanges[i].beginPos};
+            blockCovers.push_back(c);
+        }
+    }
     std::sort(blockCovers.begin(),blockCovers.end(),cover_cmp_by_old_t<hpatch_TCover>());
     _getPackedCovers<false>(oldDataSize,blockCovers,packedCoversForOld);
     std::sort(blockCovers.begin(),blockCovers.end(),cover_cmp_by_new_t<hpatch_TCover>());
+    blockCovers.resize(blockCount);
+}
+void TMatchBlockBase::_getNewPackedCover(hpatch_StreamPos_t newDataSize){
     _getPackedCovers<true>(newDataSize,blockCovers,packedCoversForNew);
 }
 
@@ -107,9 +375,19 @@ void TMatchBlockBase::_getPackedCover(hpatch_StreamPos_t newDataSize,hpatch_Stre
         return dst;
     }
 void TMatchBlockMem::packData(){
-    if (blockCovers.empty()) return;
-    oldData_end_cur=doPackData(oldData,oldData_end,packedCoversForOld);
+    _getNewPackedCover(newData_end-newData);
     newData_end_cur=doPackData(newData,newData_end,packedCoversForNew);
+
+    invalidOldRanges.clear();
+    if (isRemoveOldInvalid){
+        hpatch_TStreamInput oldStream;
+        mem_as_hStreamInput(&oldStream,oldData,oldData_end);
+        TOldInvalidFilter filter(newData,newData_end_cur,&oldStream,blockCovers,threadNum,true);
+        invalidOldRanges.swap(filter.getInvalidRanges());
+    }
+    _getOldPackedCover(oldData_end-oldData);
+    _clearV(invalidOldRanges);
+    oldData_end_cur=doPackData(oldData,oldData_end,packedCoversForOld);
 }
 
     static inline hpatch_StreamPos_t _getPackedSize(const std::vector<TPackedCover>& packedCovers){
@@ -129,32 +407,41 @@ void TMatchBlockMem::packData(){
         return true;
     }
 void TMatchBlockStream::packData(){
-    //load packed new & old data
-    const hpatch_StreamPos_t packedOldSize=_getPackedSize(packedCoversForOld);
+    _getNewPackedCover(newStream->streamSize);
     const hpatch_StreamPos_t packedNewSize=_getPackedSize(packedCoversForNew);
     _check(packedNewSize==(size_t)packedNewSize,"TMatchBlockStream::packData() packedNewSize");
-    if (packedOldSize) _check(packedNewSize+packedOldSize==(size_t)(packedNewSize+packedOldSize),"TMatchBlockStream::packData() packedOldSize");
-    _packedNewOldMem->realloc((size_t)(packedNewSize+packedOldSize));
-    oldData=_packedNewOldMem->data();
-    oldData_end_cur=oldData+packedOldSize;
-    newData=oldData_end_cur;
+    _packedNewMem.realloc((size_t)packedNewSize);
+    newData=_packedNewMem.data();
     newData_end_cur=newData+packedNewSize;
-    _out_diff_info("  load datas into memory from old & new ...\n");
-    _check(loadPackData(oldData,oldData_end_cur,oldStream,packedCoversForOld),"loadPackData(oldStream)");
+    _out_diff_info("  load new data into memory from new stream ...\n");
     _check(loadPackData(newData,newData_end_cur,newStream,packedCoversForNew),"loadPackData(newStream)");
+
+    invalidOldRanges.clear();
+    if (isRemoveOldInvalid){
+        TOldInvalidFilter filter(newData,newData_end_cur,oldStream,blockCovers,mtsets.threadNum,mtsets.oldDataIsMTSafe);
+        invalidOldRanges.swap(filter.getInvalidRanges());
+    }
+    _getOldPackedCover(oldStream->streamSize);
+    _clearV(invalidOldRanges);
+    const hpatch_StreamPos_t packedOldSize=_getPackedSize(packedCoversForOld);
+    if (packedOldSize) _check(packedOldSize==(size_t)packedOldSize,"TMatchBlockStream::packData() packedOldSize");
+    _packedOldMem.realloc((size_t)packedOldSize);
+    oldData=_packedOldMem.data();
+    oldData_end_cur=oldData+packedOldSize;
+    _out_diff_info("  load old data into memory from old stream ...\n");
+    _check(loadPackData(oldData,oldData_end_cur,oldStream,packedCoversForOld),"loadPackData(oldStream)");
 }
 
 TMatchBlockStream::TMatchBlockStream(const hpatch_TStreamInput* _newStream,const hpatch_TStreamInput* _oldStream,
-                                     size_t _matchBlockSize,size_t _threadNumForMem,size_t _threadNumForStream)
-:TMatchBlockBase(_matchBlockSize,_threadNumForMem),
+                                     size_t _matchBlockSize,const hdiff_TMTSets_s* _mtsets,bool _isRemoveOldInvalid)
+:TMatchBlockBase(_matchBlockSize,_mtsets->threadNum),
  newData(0),newData_end_cur(0),oldData(0),oldData_end_cur(0),newStream(_newStream),oldStream(_oldStream),
- threadNumForStream(_threadNumForStream),_newStreamMap(_newStream,packedCoversForNew),
- _oldStreamMap(_oldStream,packedCoversForOld),_packedNewOldMem(0),_isUnpacked(false){
+ mtsets(*_mtsets),isRemoveOldInvalid(_isRemoveOldInvalid),
+ _newStreamMap(_newStream,packedCoversForNew),
+ _oldStreamMap(_oldStream,packedCoversForOld),_isUnpacked(false){
     assert(_oldStream);
-    _packedNewOldMem=new TAutoMem();
 }
 TMatchBlockStream::~TMatchBlockStream(){
-    if (_packedNewOldMem) delete _packedNewOldMem;
 }
 
     template<bool isNew> static 
