@@ -39,17 +39,17 @@ namespace hdiff_private{
     //applying a sliding-window hit-rate threshold to output invalid ranges.
     struct TOldInvalidFilter{
         TOldInvalidFilter(const unsigned char* newData,const unsigned char* newData_end,
-                          const hpatch_TStreamInput* oldStream,const std::vector<TCover>& blockCovers,size_t threadNum,
-                          size_t minOldInvalidSize=1024/2,size_t kBloomZoom=6,size_t rollLen=5,
+                          const hpatch_TStreamInput* oldStream,const std::vector<TCover>& blockCovers,
+                          size_t threadNum,bool oldDataIsMTSafe,
+                          size_t minOldInvalidSize=1024,size_t kBloomZoom=6,size_t rollLen=5,
                           size_t R=32, size_t hitRateThreshold=64, //hitRateThreshold percent 0-256
                           size_t cacheBlockSize=(1<<20)); //1MB
         inline std::vector<hdiff_TRange>& getInvalidRanges(){ return invalidRanges; }
     private:
-        void _scanAndSmooth(const hpatch_TStreamInput* oldStream);
+        void _scanAndSmooth(const hpatch_TStreamInput* oldStream,size_t threadNum,bool oldDataIsMTSafe);
         TFastMatchForSString       bloomFilter;
         std::vector<hdiff_TRange>  invalidRanges;
         std::vector<hdiff_TRange>  matchedRanges;
-        const size_t               threadNum;
         const size_t               minOldInvalidSize;
         const size_t               kBloomZoom;
         const size_t               rollLen;
@@ -107,11 +107,10 @@ namespace hdiff_private{
         unsigned char* oldData_end_cur;
         const hpatch_TStreamInput* newStream;
         const hpatch_TStreamInput* oldStream;
-        const size_t    threadNumForStream;
+        const hdiff_TMTSets_s      mtsets;
         const bool      isRemoveOldInvalid;
         TMatchBlockStream(const hpatch_TStreamInput* _newStream,const hpatch_TStreamInput* _oldStream,
-                          size_t _matchBlockSize,size_t _threadNumForMem,size_t _threadNumForStream,
-                          bool _isRemoveOldInvalid=false);
+                          size_t _matchBlockSize,const hdiff_TMTSets_s* mtsets,bool _isRemoveOldInvalid=false);
         ~TMatchBlockStream();
         inline hpatch_StreamPos_t curNewDataSize()const{ return _isUnpacked?newStream->streamSize:(size_t)(newData_end_cur-newData); }
         inline hpatch_StreamPos_t curOldDataSize()const{ return _isUnpacked?oldStream->streamSize:(size_t)(oldData_end_cur-oldData); }
@@ -174,10 +173,9 @@ namespace hdiff_private{
 
     struct TCoversOptimStream:public TCoversOptim<TMatchBlockStream>{
         TCoversOptimStream(const hpatch_TStreamInput* newStream,const hpatch_TStreamInput* oldStream,
-                       size_t matchBlockSize,size_t threadNumForMem,size_t threadNumForStream,
-                       bool isRemoveOldInvalid=false)
+                       size_t matchBlockSize,const hdiff_TMTSets_s* mtsets,bool isRemoveOldInvalid)
         :TCoversOptim<TMatchBlockStream>(&_matchBlock),
-         _matchBlock(newStream,oldStream,matchBlockSize,threadNumForMem,threadNumForStream,isRemoveOldInvalid){
+         _matchBlock(newStream,oldStream,matchBlockSize,mtsets,isRemoveOldInvalid){
             matchBlock->getBlockCovers();
             matchBlock->packData();
         }

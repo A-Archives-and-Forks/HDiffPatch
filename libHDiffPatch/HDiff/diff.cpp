@@ -1387,8 +1387,7 @@ void get_match_covers_by_stream_and_sstring(const hpatch_TStreamInput* newData,c
 
     TCachedNewOldStreams cachedStreams;
     cachedStreams.freeCached=_free_TCoversOptimStream;
-    cachedStreams.import=new TCoversOptimStream(newData,oldData,fastMatchBlockSize,mtsets->threadNum,
-                                                mtsets->threadNumForSearch,isRemoveOldInvalid);
+    cachedStreams.import=new TCoversOptimStream(newData,oldData,fastMatchBlockSize,mtsets,isRemoveOldInvalid);
     TCoversOptimStream& coversOp=*(TCoversOptimStream*)cachedStreams.import;
     get_match_covers_by_sstring(coversOp.matchBlock->newData,coversOp.matchBlock->newData_end_cur,
                                 coversOp.matchBlock->oldData,coversOp.matchBlock->oldData_end_cur,

@@ -338,7 +338,10 @@ void TSuffixString::build_cache(size_t threadNum){
     clear_cache();
 #if (_SSTRING_FAST_MATCH>0)
     #define kFMZoom 4  //ctrl memory size & match speed
-    if (m_isUsedFastMatch) m_fastMatch.buildMatchCache(m_src_begin,m_src_end,threadNum,kFMZoom,_SSTRING_FAST_MATCH);
+    if (m_isUsedFastMatch){
+        //_out_diff_info("    build cache for sstring fast match ...\n");
+        m_fastMatch.buildMatchCache(m_src_begin,m_src_end,threadNum,kFMZoom,_SSTRING_FAST_MATCH);
+    }
 #endif
     const size_t kUsedCacheMinSASize =2*(1<<20); //Enable large cache table only when string is large.
     if (SASize()>kUsedCacheMinSASize){

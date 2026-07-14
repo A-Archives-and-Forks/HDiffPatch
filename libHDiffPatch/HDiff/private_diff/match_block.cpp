@@ -109,14 +109,17 @@ namespace hdiff_private {
 
 TOldInvalidFilter::TOldInvalidFilter(const unsigned char* newData,const unsigned char* newData_end,
                                      const hpatch_TStreamInput* oldStream,const std::vector<TCover>& blockCovers,
-                                     size_t _threadNum, size_t _minOldInvalidSize,size_t _kBloomZoom,size_t _rollLen,
+                                     size_t threadNum,bool oldDataIsMTSafe,
+                                     size_t _minOldInvalidSize,size_t _kBloomZoom,size_t _rollLen,
                                      size_t _R,size_t _hitRateThreshold,size_t _cacheBlockSize)
- :threadNum(_threadNum),minOldInvalidSize(_minOldInvalidSize),kBloomZoom(_kBloomZoom),rollLen(_rollLen),
+ :minOldInvalidSize(_minOldInvalidSize),kBloomZoom(_kBloomZoom),rollLen(_rollLen),
   R(_R),hitRateThreshold(_hitRateThreshold),cacheBlockSize(_cacheBlockSize),oldSize(oldStream?oldStream->streamSize:0){
     if (((size_t)(newData_end-newData)>=rollLen)&&(oldSize>=rollLen)&&(minOldInvalidSize>0)){
+        _out_diff_info("    build cache for resach invalid oldData ranges ...\n");
         bloomFilter.buildMatchCache(newData,newData_end,threadNum,kBloomZoom,rollLen);
         _toMatchedRanges(matchedRanges,blockCovers);
-        _scanAndSmooth(oldStream);
+        _out_diff_info("    find invalid oldData ranges for remove ...\n");
+        _scanAndSmooth(oldStream,threadNum,oldDataIsMTSafe);
     }
 }
 
@@ -132,7 +135,7 @@ struct _TOldInvalidScanCtx{
     std::vector<hdiff_TRange>*        allInvalidRanges;
     CHLocker                          taskLocker;
     CHLocker                          mergeLocker;
-    CHLocker                          readLocker;
+    CHLocker*                         readLocker;
 #endif
 };
 
@@ -166,15 +169,15 @@ static bool _getNextScanTask(_TOldInvalidScanCtx& ctx,hpatch_StreamPos_t& _pos, 
 
     static void _processHitAndUpdateRing(const _TOldInvalidScanCtx& ctx,hpatch_StreamPos_t& curInvalidStart,size_t& hitCount,
                                          unsigned char hit,hpatch_StreamPos_t curOldPos,hpatch_StreamPos_t segOldPos,
-                                         size_t R,std::vector<unsigned char>& ring,std::vector<hdiff_TRange>& localRanges){
+                                         size_t R,unsigned char* ring,std::vector<hdiff_TRange>& localRanges){
         const size_t kWin=R*2+1;
         bool isInvalid = ((hpatch_StreamPos_t)hitCount*256 < (hpatch_StreamPos_t)kWin*ctx.hitRateThreshold);
         if (isInvalid){
             if (curInvalidStart==hpatch_kNullStreamPos)
-                curInvalidStart=(curOldPos>segOldPos+R)?(curOldPos-R):segOldPos;
+                curInvalidStart=curOldPos;
         } else {
             if (curInvalidStart!=hpatch_kNullStreamPos){
-                hdiff_TRange r={curInvalidStart,std::min((hpatch_StreamPos_t)(curOldPos+R),ctx.oldSize)};
+                hdiff_TRange r={curInvalidStart,curOldPos};
                 if (((hpatch_StreamPos_t)(r.endPos-r.beginPos)>=ctx.minOldInvalidSize)||(curInvalidStart==segOldPos))
                     localRanges.push_back(r);
                 curInvalidStart=hpatch_kNullStreamPos;
@@ -185,13 +188,12 @@ static bool _getNextScanTask(_TOldInvalidScanCtx& ctx,hpatch_StreamPos_t& _pos, 
         ring[ri] = hit;
     }
 
-static void _scanSegment(_TOldInvalidScanCtx& ctx,const unsigned char* buf, size_t bufSize,
+static void _scanSegment(_TOldInvalidScanCtx& ctx,const unsigned char* buf, size_t bufSize,unsigned char* ring,
                          hpatch_StreamPos_t segOldPos,std::vector<hdiff_TRange>& localRanges){
     hpatch_StreamPos_t curOldPos=segOldPos;
     const size_t R=ctx.R, rollLen=ctx.rollLen, kWin=R*2+1;
     if (bufSize<rollLen+R) return;
 
-    std::vector<unsigned char>  ring(kWin,0);
     hpatch_StreamPos_t          curInvalidStart=hpatch_kNullStreamPos;
     const unsigned char*        cur=buf;
     const unsigned char*        buf_end=buf+bufSize;
@@ -227,10 +229,9 @@ static void _scanSegment(_TOldInvalidScanCtx& ctx,const unsigned char* buf, size
 }
 
 #if (_IS_USED_MULTITHREAD)
-static void _scanWorker(_TOldInvalidScanCtx* ctx){
+static void _scanWorker(_TOldInvalidScanCtx* ctx,unsigned char* buf){
     std::vector<hdiff_TRange> localRanges;
-    TAutoMem localCache(ctx->cacheBlockSize);
-    unsigned char* buf=localCache.data();
+    localRanges.reserve(ctx->cacheBlockSize/(ctx->minOldInvalidSize*2));
     while (true) {
         hpatch_StreamPos_t taskBegin,taskEnd;
         {
@@ -239,14 +240,14 @@ static void _scanWorker(_TOldInvalidScanCtx* ctx){
                 break;
         }
         size_t segLen=(size_t)(taskEnd-taskBegin);
-        assert(segLen<=localCache.size());
+        assert(segLen<=ctx->cacheBlockSize);
         {
-            CAutoLocker _autoLocker(ctx->readLocker);
+            CAutoLocker _autoLocker(*ctx->readLocker);
             if (!ctx->oldStream->read(ctx->oldStream, taskBegin,buf,buf+segLen))
                 throw std::runtime_error("TOldInvalidFilter::_scanWorker() oldStream read error!");
         }
         localRanges.clear();
-        _scanSegment(*ctx,buf,segLen,taskBegin,localRanges);
+        _scanSegment(*ctx,buf,segLen,buf+segLen,taskBegin,localRanges);
         if (!localRanges.empty()){
             CAutoLocker _autoLocker(ctx->mergeLocker);
             ctx->allInvalidRanges->insert(ctx->allInvalidRanges->end(),localRanges.begin(),localRanges.end());
@@ -255,7 +256,7 @@ static void _scanWorker(_TOldInvalidScanCtx* ctx){
 }
 #endif
 
-void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream){
+void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream,size_t threadNum,bool oldDataIsMTSafe){
     if (oldSize<minOldInvalidSize) return;
     if (oldSize<(R+1)) return;
 
@@ -276,6 +277,10 @@ void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream){
 
 #if (_IS_USED_MULTITHREAD)
     if ((threadNum>1) && (oldSize/2>=_cacheBlockSize)) {
+        while ((threadNum>2)&&(oldSize/threadNum<_cacheBlockSize)) --threadNum;
+        TAutoMem localCache((_cacheBlockSize+kWin)*threadNum);
+        CHLocker readLocker(!oldDataIsMTSafe);
+        ctx.readLocker        = &readLocker;
         ctx.nextPos           = 0;
         ctx.rangeIdx          = 0;
         ctx.allInvalidRanges  = &invalidRanges;
@@ -283,14 +288,14 @@ void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream){
         const size_t workerCount = threadNum - 1;
         std::vector<std::thread> threads(workerCount);
         for (size_t i=0; i<workerCount;++i)
-            threads[i]=std::thread(_scanWorker,&ctx);
-        _scanWorker(&ctx);
+            threads[i]=std::thread(_scanWorker,&ctx,localCache.data()+i*(_cacheBlockSize+kWin));
+        _scanWorker(&ctx,localCache.data()+workerCount*(_cacheBlockSize+kWin));
         for (size_t i=0;i<workerCount;++i)
             threads[i].join();
     } else
 #endif
     {
-        TAutoMem localCache(_cacheBlockSize);
+        TAutoMem localCache(_cacheBlockSize+kWin);
         unsigned char*      buf=localCache.data();
         hpatch_StreamPos_t  pos=0;
         size_t              rangeIdx=0;
@@ -300,7 +305,7 @@ void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream){
             assert(localCache.size()>=segLen);
             if (!oldStream->read(oldStream,taskBegin,buf,buf+segLen))
                 throw std::runtime_error("TOldInvalidFilter::_scanAndSmooth() oldStream read error!");
-            _scanSegment(ctx,buf,segLen,taskBegin,invalidRanges);
+            _scanSegment(ctx,buf,segLen,buf+segLen,taskBegin,invalidRanges);
         }
     }
 
@@ -333,7 +338,6 @@ void TMatchBlockMem::getBlockCovers(){
 
 void TMatchBlockStream::getBlockCovers(){
     if (matchBlockSize==0) return;
-    const hdiff_TMTSets_s mtsets={threadNum,threadNumForStream,false,false};
     get_match_covers_by_stream(newStream,oldStream,blockCovers,matchBlockSize,&mtsets);
 }
 
@@ -378,7 +382,7 @@ void TMatchBlockMem::packData(){
     if (isRemoveOldInvalid){
         hpatch_TStreamInput oldStream;
         mem_as_hStreamInput(&oldStream,oldData,oldData_end);
-        TOldInvalidFilter filter(newData,newData_end_cur,&oldStream,blockCovers,threadNum);
+        TOldInvalidFilter filter(newData,newData_end_cur,&oldStream,blockCovers,threadNum,true);
         invalidOldRanges.swap(filter.getInvalidRanges());
     }
     _getOldPackedCover(oldData_end-oldData);
@@ -414,7 +418,7 @@ void TMatchBlockStream::packData(){
 
     invalidOldRanges.clear();
     if (isRemoveOldInvalid){
-        TOldInvalidFilter filter(newData,newData_end_cur,oldStream,blockCovers,threadNum);
+        TOldInvalidFilter filter(newData,newData_end_cur,oldStream,blockCovers,mtsets.threadNum,mtsets.oldDataIsMTSafe);
         invalidOldRanges.swap(filter.getInvalidRanges());
     }
     _getOldPackedCover(oldStream->streamSize);
@@ -429,11 +433,10 @@ void TMatchBlockStream::packData(){
 }
 
 TMatchBlockStream::TMatchBlockStream(const hpatch_TStreamInput* _newStream,const hpatch_TStreamInput* _oldStream,
-                                     size_t _matchBlockSize,size_t _threadNumForMem,size_t _threadNumForStream,
-                                     bool _isRemoveOldInvalid)
-:TMatchBlockBase(_matchBlockSize,_threadNumForMem),
+                                     size_t _matchBlockSize,const hdiff_TMTSets_s* _mtsets,bool _isRemoveOldInvalid)
+:TMatchBlockBase(_matchBlockSize,_mtsets->threadNum),
  newData(0),newData_end_cur(0),oldData(0),oldData_end_cur(0),newStream(_newStream),oldStream(_oldStream),
- threadNumForStream(_threadNumForStream),isRemoveOldInvalid(_isRemoveOldInvalid),
+ mtsets(*_mtsets),isRemoveOldInvalid(_isRemoveOldInvalid),
  _newStreamMap(_newStream,packedCoversForNew),
  _oldStreamMap(_oldStream,packedCoversForOld),_isUnpacked(false){
     assert(_oldStream);

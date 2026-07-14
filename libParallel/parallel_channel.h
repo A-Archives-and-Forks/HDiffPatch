@@ -42,7 +42,7 @@
 
 struct CHLocker{
     HLocker locker;
-    inline CHLocker():locker(0) { locker=locker_new(); }
+    inline explicit CHLocker(bool isAutoNew=true):locker(0) { if (isAutoNew) locker=locker_new(); }
     inline ~CHLocker() { locker_delete(locker); }
 };
 

@@ -56,14 +56,14 @@ namespace hdiff_private{
 
 class TFastMatchForSString{
 public:
-    typedef uint32_t      THash;
+    typedef uint64_t      THash;
     typedef unsigned char TChar;
 
     inline TFastMatchForSString(){}
     inline void clear(){ bf.clear(); }
     void buildMatchCache(const TChar* src_begin,const TChar* src_end,size_t threadNum,size_t kBloomZoom,size_t kRollLen);
-    static hpatch_force_inline THash getHash(const TChar* datas,size_t kRollLen) { return fast_adler32_start(datas,kRollLen); }
-    static hpatch_force_inline THash rollHash(THash h,const TChar* cur,size_t kRollLen) { return fast_adler32_roll(h,kRollLen,*(cur-kRollLen),cur[0]); }
+    static hpatch_force_inline THash getHash(const TChar* datas,size_t kRollLen) { return fast_adler64_start(datas,kRollLen); }
+    static hpatch_force_inline THash rollHash(THash h,const TChar* cur,size_t kRollLen) { return fast_adler64_roll(h,kRollLen,*(cur-kRollLen),cur[0]); }
     hpatch_force_inline bool isHit(THash h) const { return bf.is_hit(h); }
 private:
     TBloomFilter<THash>  bf;
