@@ -33,6 +33,7 @@
 //  bz2DecompressPlugin;
 //  lzmaDecompressPlugin;
 //  lzma2DecompressPlugin;
+//  lzma2mtDecompressPlugin;
 //  lz4DecompressPlugin;
 //  zstdDecompressPlugin;
 //  brotliDecompressPlugin;
@@ -40,7 +41,7 @@
 //  tuzDecompressPlugin;
 
 // _bz2DecompressPlugin_unsz   : support for bspatch_with_cache(), diffData created by bsdiff or "hdiffz -BSD ..."
-// _lzma2DecompressPlugin_unsz :only for test, support for bspatch_with_cache(), diffData compressed by lzma2 (lzma2CompressPlugin)
+//   _lzma2DecompressPlugin_unsz : only for yourself code, support for bspatch_with_cache(), diffData compressed by lzma2 (lzma2CompressPlugin)
 // _7zXZDecompressPlugin      : support for vcpatch_with_cache(), diffData created by "xdelta3 -S lzma ..."
 // _7zXZDecompressPlugin_a    : support for vcpatch_with_cache(), diffData created by "hdiffz -VCD-compressLevel ..."
 #include <stdlib.h> //malloc free
@@ -712,6 +713,10 @@ static void __dec_free(void* _, void* address){
 #   include "LzmaDec.h" // "lzma/C/LzmaDec.h" https://github.com/sisong/lzma
 #   ifdef _CompressPlugin_lzma2
 #       include "Lzma2Dec.h"
+#       if defined(_IS_USED_MULTITHREAD) && !defined(Z7_ST)
+#           include "Lzma2DecMt.h"
+#           include "libParallel/parallel_import_c.h"
+#       endif
 #   endif
 #endif
 #endif
@@ -962,6 +967,257 @@ static void __dec_free(void* _, void* address){
     static hpatch_TDecompress _lzma2DecompressPlugin_unsz={_lzma2_is_can_open,_lzma2_open,
                                                           _lzma2_close,_lzma2_decompress_part_unsz};
 #endif//_CompressPlugin_lzma2
+
+
+//--- lzma2 multi-thread decompress ---
+#if defined(_CompressPlugin_lzma2) && defined(_IS_USED_MULTITHREAD) && (!defined(Z7_ST))
+#ifndef _CompressPlugin_lzma2mt
+#   define _CompressPlugin_lzma2mt 1
+#endif
+#endif
+
+#ifdef _CompressPlugin_lzma2mt
+
+#define kLzma2mtRingBufSize  (1<<22)  // 4MB
+
+typedef struct {
+    unsigned char*  buf;
+    size_t          capacity;
+    size_t          r, w, used;
+    HLocker         locker;
+    HCondvar        hasSpaceCond;
+    HCondvar        hasDataCond;
+} _lzma2mt_ringbuf;
+
+typedef struct {
+    ISeqInStream                vt;
+    const struct hpatch_TStreamInput* codeStream;
+    hpatch_StreamPos_t          curPos, endPos;
+    hpatch_BOOL volatile*       pIsClosing;
+} _lzma2mt_InStream;
+
+typedef struct {
+    ISeqOutStream                vt;
+    struct _lzma2mt_TDecompress* dec;
+} _lzma2mt_OutStream;
+
+typedef struct _lzma2mt_TDecompress {
+    ISzAlloc                memAllocBase;
+    _lzma2mt_ringbuf        ring;
+    _lzma2mt_InStream       inStream;
+    _lzma2mt_OutStream      outStream;
+    CLzma2DecMtHandle       decMtHandle;
+    CLzma2DecMtProps        mtProps;
+    Byte                    propByte;
+    hpatch_StreamPos_t      dataSize;
+    size_t                  threadNum;
+    volatile hpatch_BOOL    isDecodeFinished;
+    volatile hpatch_BOOL    isClosing;
+    HCondvar                finishedCond;
+    hpatch_dec_error_t      decError;
+} _lzma2mt_TDecompress;
+
+static void* __lzma2mt_dec_Alloc(ISzAllocPtr p, size_t size)
+    __dec_Alloc_fun(_lzma2mt_TDecompress,p,size)
+
+static SRes _lzma2mt_in_read(ISeqInStreamPtr p, void *buf, size_t *size){
+    _lzma2mt_InStream* self=(_lzma2mt_InStream*)p;
+    if (*size==0) return SZ_OK;
+    if (*self->pIsClosing){ *size=0; return SZ_OK; }
+    {
+        hpatch_StreamPos_t remain=self->endPos-self->curPos;
+        if (*size>remain) *size=(size_t)remain;
+    }
+    if (*size==0) return SZ_OK;
+    if (!self->codeStream->read(self->codeStream,self->curPos,
+                                (unsigned char*)buf,(unsigned char*)buf+*size))
+        return SZ_ERROR_READ;
+    self->curPos+=*size;
+    return SZ_OK;
+}
+
+static size_t _lzma2mt_out_write(ISeqOutStreamPtr p, const void *buf, size_t size){
+    _lzma2mt_OutStream* out=(_lzma2mt_OutStream*)p;
+    _lzma2mt_TDecompress* self=out->dec;
+    const unsigned char* src=(const unsigned char*)buf;
+    size_t remaining=size;
+    while (remaining>0){
+        c_locker_enter(self->ring.locker);
+        while ((self->ring.used==self->ring.capacity) && (!self->isClosing)){
+            c_condvar_wait(self->ring.hasSpaceCond,self->ring.locker);
+        }
+        if (self->isClosing){ c_locker_leave(self->ring.locker); return 0; }
+        {
+            size_t freeSpace=self->ring.capacity-self->ring.used;
+            size_t toCopy=(remaining<freeSpace)?remaining:freeSpace;
+            size_t atEnd=self->ring.capacity-self->ring.w;
+            if (toCopy>atEnd) toCopy=atEnd;
+            memcpy(self->ring.buf+self->ring.w,src,toCopy);
+            self->ring.w=(self->ring.w+toCopy)%self->ring.capacity;
+            self->ring.used+=toCopy;
+            src+=toCopy;
+            remaining-=toCopy;
+        }
+        c_condvar_signal(self->ring.hasDataCond);
+        c_locker_leave(self->ring.locker);
+    }
+    return size;
+}
+
+static void _lzma2mt_decode_thread(int threadIndex, void* workData){
+    _lzma2mt_TDecompress* self=(_lzma2mt_TDecompress*)workData;
+    UInt64 inProcessed=0;
+    int isMT=0;
+    const UInt64* outSizePtr=(self->dataSize>0)?&self->dataSize:NULL;
+    SRes res=Lzma2DecMt_Decode(self->decMtHandle,self->propByte,&self->mtProps,
+                               &self->outStream.vt,outSizePtr,1,
+                               &self->inStream.vt,&inProcessed,&isMT,NULL);
+    if ((res!=SZ_OK) && (!self->isClosing))
+        self->decError=hpatch_dec_error;
+    c_locker_enter(self->ring.locker);
+    self->isDecodeFinished=hpatch_TRUE;
+    c_condvar_broadcast(self->ring.hasDataCond);
+    c_condvar_broadcast(self->ring.hasSpaceCond);
+    c_condvar_signal(self->finishedCond);
+    c_locker_leave(self->ring.locker);
+}
+
+static hpatch_BOOL _lzma2mt_is_can_open(const char* compressType){
+    return (0==strcmp(compressType,"lzma2"));
+}
+
+static hpatch_decompressHandle _lzma2mt_open(hpatch_TDecompress* decompressPlugin,
+                                              hpatch_StreamPos_t dataSize,
+                                              const hpatch_TStreamInput* codeStream,
+                                              hpatch_StreamPos_t code_begin,
+                                              hpatch_StreamPos_t code_end){
+    _lzma2mt_TDecompress* self=0;
+    unsigned char propsSize=0;
+    if (code_end-code_begin<1) _dec_openErr_rt();
+    if (!codeStream->read(codeStream,code_begin,&propsSize,&propsSize+1)) return 0;
+    ++code_begin;
+
+    self=(_lzma2mt_TDecompress*)_dec_malloc(sizeof(_lzma2mt_TDecompress));
+    if (!self) _dec_memErr_rt();
+    memset(self,0,sizeof(_lzma2mt_TDecompress));
+
+    self->memAllocBase.Alloc=__lzma2mt_dec_Alloc;
+    *((void**)&self->memAllocBase.Free)=(void*)__dec_free;
+
+    self->ring.buf=(unsigned char*)_dec_malloc(kLzma2mtRingBufSize);
+    if (!self->ring.buf){ free(self); _dec_memErr_rt(); }
+    self->ring.capacity=kLzma2mtRingBufSize;
+    self->ring.r=self->ring.w=self->ring.used=0;
+    self->ring.locker=c_locker_new();
+    self->ring.hasSpaceCond=c_condvar_new();
+    self->ring.hasDataCond=c_condvar_new();
+    if ((!self->ring.locker) || (!self->ring.hasSpaceCond) || (!self->ring.hasDataCond))
+        goto _lzma2mt_open_err;
+
+    self->inStream.vt.Read=_lzma2mt_in_read;
+    self->inStream.codeStream=codeStream;
+    self->inStream.curPos=code_begin;
+    self->inStream.endPos=code_end;
+    self->inStream.pIsClosing=&self->isClosing;
+
+    self->outStream.vt.Write=_lzma2mt_out_write;
+    self->outStream.dec=self;
+
+    self->decMtHandle=Lzma2DecMt_Create(&self->memAllocBase,&self->memAllocBase);
+    if (!self->decMtHandle) goto _lzma2mt_open_err;
+
+    self->propByte=propsSize;
+    self->dataSize=dataSize;
+    self->threadNum=decompressPlugin->dec_threadNum;
+    if (self->threadNum<1) self->threadNum=1;
+
+    Lzma2DecMtProps_Init(&self->mtProps);
+    self->mtProps.numThreads=(unsigned)self->threadNum;
+    self->isDecodeFinished=hpatch_FALSE;
+    self->isClosing=hpatch_FALSE;
+    self->finishedCond=c_condvar_new();
+    if (!self->finishedCond) goto _lzma2mt_open_err;
+
+    if (!c_thread_parallel(1,_lzma2mt_decode_thread,self,0,0)){
+        c_condvar_delete(self->finishedCond); self->finishedCond=0;
+        goto _lzma2mt_open_err;
+    }
+    return self;
+
+_lzma2mt_open_err:
+    if (self->ring.locker) c_locker_delete(self->ring.locker);
+    if (self->ring.hasSpaceCond) c_condvar_delete(self->ring.hasSpaceCond);
+    if (self->ring.hasDataCond) c_condvar_delete(self->ring.hasDataCond);
+    if (self->ring.buf) free(self->ring.buf);
+    if (self->decMtHandle) Lzma2DecMt_Destroy(self->decMtHandle);
+    if (self->finishedCond) c_condvar_delete(self->finishedCond);
+    free(self);
+    _dec_openErr_rt();
+    return 0;
+}
+
+static hpatch_BOOL _lzma2mt_close(hpatch_TDecompress* decompressPlugin,
+                                  hpatch_decompressHandle decompressHandle){
+    _lzma2mt_TDecompress* self=(_lzma2mt_TDecompress*)decompressHandle;
+    if (!self) return hpatch_TRUE;
+    self->isClosing=hpatch_TRUE;
+    *self->inStream.pIsClosing=hpatch_TRUE;
+    // wake up any blocked threads
+    c_locker_enter(self->ring.locker);
+    c_condvar_broadcast(self->ring.hasSpaceCond);
+    c_condvar_broadcast(self->ring.hasDataCond);
+    c_locker_leave(self->ring.locker);
+    // wait for decode thread to finish
+    if (!self->isDecodeFinished){
+        c_locker_enter(self->ring.locker);
+        while (!self->isDecodeFinished)
+            c_condvar_wait(self->finishedCond,self->ring.locker);
+        c_locker_leave(self->ring.locker);
+    }
+    if (self->decMtHandle)
+        Lzma2DecMt_Destroy(self->decMtHandle);
+    if (self->ring.locker) c_locker_delete(self->ring.locker);
+    if (self->ring.hasSpaceCond) c_condvar_delete(self->ring.hasSpaceCond);
+    if (self->ring.hasDataCond) c_condvar_delete(self->ring.hasDataCond);
+    if (self->ring.buf) free(self->ring.buf);
+    if (self->finishedCond) c_condvar_delete(self->finishedCond);
+    _dec_onDecErr_up();
+    free(self);
+    return hpatch_TRUE;
+}
+
+static hpatch_BOOL _lzma2mt_decompress_part(hpatch_decompressHandle decompressHandle,
+                                            unsigned char* out_part_data,unsigned char* out_part_data_end){
+    _lzma2mt_TDecompress* self=(_lzma2mt_TDecompress*)decompressHandle;
+    unsigned char* out_cur=out_part_data;
+    while (out_cur<out_part_data_end){
+        c_locker_enter(self->ring.locker);
+        while (self->ring.used==0 && !self->isDecodeFinished){
+            c_condvar_wait(self->ring.hasDataCond,self->ring.locker);
+        }
+        if (self->ring.used>0){
+            size_t need=(size_t)(out_part_data_end-out_cur);
+            size_t toCopy=need<self->ring.used?need:self->ring.used;
+            size_t atEnd=self->ring.capacity-self->ring.r;
+            if (toCopy>atEnd) toCopy=atEnd;
+            memcpy(out_cur,self->ring.buf+self->ring.r,toCopy);
+            self->ring.r=(self->ring.r+toCopy)%self->ring.capacity;
+            self->ring.used-=toCopy;
+            out_cur+=toCopy;
+            c_condvar_signal(self->ring.hasSpaceCond);
+            c_locker_leave(self->ring.locker);
+        }else{
+            c_locker_leave(self->ring.locker);
+            _dec_onDecErr_rt();
+        }
+    }
+    return hpatch_TRUE;
+}
+
+static hpatch_TDecompress lzma2mtDecompressPlugin={_lzma2mt_is_can_open,_lzma2mt_open,
+                                                   _lzma2mt_close,_lzma2mt_decompress_part};
+#endif//_CompressPlugin_lzma2mt
+
 
 #ifdef _CompressPlugin_7zXZ
 #if (_IsNeedIncludeDefaultCompressHead)

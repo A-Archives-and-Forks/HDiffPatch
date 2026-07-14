@@ -237,6 +237,9 @@ static void printUsage(){
            "      if parallelThreadNumber>1 then open multi-thread Parallel mode;\n"
            "      now support window diffData(created by hdiffz -WD) and single compressed diffData(created by hdiffz -SD);\n"
            "      can set 1..5, DEFAULT -p-1!\n"
+           "  -p-dec-decThreadNumber\n"
+           "      if decThreadNumber>1 then open multi-thread decompress mode, DEFAULT -p-dec-1!\n"
+           "      now only support lzma2 with blockSize; NOTE: need more memory!\n"
 #endif
 #if ((_IS_NEED_DIR_DIFF_PATCH)||(_IS_NEED_VCDIFF)||(_IS_NEED_WINDOW_DIFF))
            "  -C-checksumSets\n"
@@ -354,12 +357,12 @@ typedef enum THPatchResult {
 
 int hpatch(const char* oldFileName,const char* diffFileName,const char* outNewFileName,
            hpatch_BOOL isLoadOldAll,size_t patchCacheSize,hpatch_StreamPos_t diffDataOffset,
-           hpatch_StreamPos_t diffDataSize,TPatchChecksumSet* checksumSet,size_t threadNum);
+           hpatch_StreamPos_t diffDataSize,TPatchChecksumSet* checksumSet,size_t threadNum,size_t dec_threadNum);
 #if (_IS_NEED_DIR_DIFF_PATCH)
 int hpatch_dir(const char* oldPath,const char* diffFileName,const char* outNewPath,
                hpatch_BOOL isLoadOldAll,size_t patchCacheSize,size_t kMaxOpenFileNumber,
                TPatchChecksumSet* checksumSet,IHPatchDirListener* hlistener,
-               hpatch_StreamPos_t diffDataOffset,hpatch_StreamPos_t diffDataSize,size_t threadNum);
+               hpatch_StreamPos_t diffDataOffset,hpatch_StreamPos_t diffDataSize,size_t threadNum,size_t dec_threadNum);
 #endif
 #if (_IS_NEED_SFX)
 int createSfx(const char* selfExecuteFileName,const char* diffFileName,const char* out_sfxFileName);
@@ -439,7 +442,6 @@ static hpatch_BOOL _toChecksumSet(const char* psets,TPatchChecksumSet* checksumS
 #define _THREAD_NUMBER_NULL     _kNULL_SIZE
 #define _THREAD_NUMBER_DEFAULT  1
 #define _THREAD_NUMBER_MAX      5
-
 #if (_IS_NEED_CMDLINE)
 #define _isSwapToPatchTag(tag) (0==strcmp("--patch",tag))
 
@@ -465,6 +467,7 @@ int hpatch_cmd_line(int argc, const char * argv[]){
     hpatch_BOOL isOldPathInputEmpty=_kNULL_VALUE;
     hpatch_BOOL isRunSFX=_kNULL_VALUE;
     size_t      threadNum=_THREAD_NUMBER_NULL;
+    size_t      dec_threadNum=_THREAD_NUMBER_NULL;
 #if (_IS_NEED_SFX)
     const char* out_SFX=0;
     const char* selfExecuteFile=0;
@@ -520,9 +523,15 @@ int hpatch_cmd_line(int argc, const char * argv[]){
             } break;
 #if (_IS_USED_MULTITHREAD)
             case 'p':{
-                const char* pnum=op+3;
-                _options_check((threadNum==_THREAD_NUMBER_NULL)&&(op[2]=='-'),"-p-?");
-                _options_check(a_to_size(pnum,strlen(pnum),&threadNum),"-p-?");
+                if ((op[2]=='-')&&(strncmp(op+3,"dec-",4)==0)){
+                    const char* pnum=op+3+4;
+                    _options_check(dec_threadNum==_THREAD_NUMBER_NULL,"-p-dec-?");
+                    _options_check(a_to_size(pnum,strlen(pnum),&dec_threadNum),"-p-dec-?");
+                }else{
+                    const char* pnum=op+3;
+                    _options_check((threadNum==_THREAD_NUMBER_NULL)&&(op[2]=='-'),"-p-?");
+                    _options_check(a_to_size(pnum,strlen(pnum),&threadNum),"-p-?");
+                }
             } break;
 #endif
 #if (_IS_NEED_SFX)
@@ -604,6 +613,10 @@ int hpatch_cmd_line(int argc, const char * argv[]){
     if (threadNum>1)
         _parallel_import_c_on_error=_on_mt_error;
 #endif
+    if (dec_threadNum==_THREAD_NUMBER_NULL)
+        dec_threadNum=_THREAD_NUMBER_DEFAULT;
+    if (dec_threadNum>_THREAD_NUMBER_MAX)
+        dec_threadNum=_THREAD_NUMBER_MAX;
 #if (_IS_NEED_SFX)
     if ((argc<=1)&&(!isRunSFX)){
         hpatch_StreamPos_t _diffDataOffset=0;
@@ -736,12 +749,12 @@ int hpatch_cmd_line(int argc, const char * argv[]){
 #if (_IS_NEED_DIR_DIFF_PATCH)
             if (dirDiffInfo.isDirDiff){
                 return hpatch_dir(oldPath,diffFileName,outNewPath,isLoadOldAll,patchCacheSize,kMaxOpenFileNumber,
-                                  &checksumSet,&defaultPatchDirlistener,diffDataOffset,diffDataSize,threadNum);
+                                  &checksumSet,&defaultPatchDirlistener,diffDataOffset,diffDataSize,threadNum,dec_threadNum);
             }else
 #endif
             {
                 return hpatch(oldPath,diffFileName,outNewPath,isLoadOldAll,patchCacheSize,
-                              diffDataOffset,diffDataSize,&checksumSet,threadNum);
+                              diffDataOffset,diffDataSize,&checksumSet,threadNum,dec_threadNum);
             }
         }else
 #if (_IS_NEED_DIR_DIFF_PATCH)
@@ -765,12 +778,12 @@ int hpatch_cmd_line(int argc, const char * argv[]){
             if (dirDiffInfo.isDirDiff){
                 result=hpatch_dir(oldPath,diffFileName,newTempName,isLoadOldAll,patchCacheSize,
                                   kMaxOpenFileNumber,&checksumSet,&defaultPatchDirlistener,
-                                  diffDataOffset,diffDataSize,threadNum);
+                                  diffDataOffset,diffDataSize,threadNum,dec_threadNum);
             }else
 #endif
             {
                 result=hpatch(oldPath,diffFileName,newTempName,isLoadOldAll,patchCacheSize,
-                              diffDataOffset,diffDataSize,&checksumSet,threadNum);
+                              diffDataOffset,diffDataSize,&checksumSet,threadNum,dec_threadNum);
             }
             if (result==HPATCH_SUCCESS){
                 _return_check(hpatch_removeFile(oldPath),
@@ -797,7 +810,7 @@ int hpatch_cmd_line(int argc, const char * argv[]){
                           HPATCH_TEMPPATH_ERROR,"getTempPathName(outNewPath)");
             printf("NOTE: all in outNewPath temp directory will be move to oldDirectory after patch!\n");
             result=hpatch_dir(oldPath,diffFileName,newTempDir,isLoadOldAll,patchCacheSize,kMaxOpenFileNumber,
-                              &checksumSet,&tempDirPatchListener,diffDataOffset,diffDataSize,threadNum);
+                              &checksumSet,&tempDirPatchListener,diffDataOffset,diffDataSize,threadNum,dec_threadNum);
             if (result==HPATCH_SUCCESS){
                 printf("all in outNewPath temp directory moved to oldDirectory!\n");
             }else if(!hpatch_isPathNotExist(newTempDir)){
@@ -841,7 +854,7 @@ int hpatch_cmd_line(int argc, const char * argv[]){
 
 #define _try_rt_dec(dec) { if (dec.is_can_open(compressType)) return &dec; }
 
-static const hpatch_TDecompress* __find_decompressPlugin(const char* compressType){
+static const hpatch_TDecompress* __find_decompressPlugin(const char* compressType,size_t dec_threadNum){
 #if ((defined(_CompressPlugin_ldef))&&_IS_NEED_decompressor_ldef_replace_zlib)
     _try_rt_dec(ldefDecompressPlugin);
 #else
@@ -854,6 +867,9 @@ static const hpatch_TDecompress* __find_decompressPlugin(const char* compressTyp
 #endif
 #ifdef  _CompressPlugin_lzma
     _try_rt_dec(lzmaDecompressPlugin);
+#endif
+#ifdef  _CompressPlugin_lzma2mt
+    if (dec_threadNum>1) _try_rt_dec(lzma2mtDecompressPlugin);
 #endif
 #ifdef  _CompressPlugin_lzma2
     _try_rt_dec(lzma2DecompressPlugin);
@@ -908,16 +924,17 @@ static hpatch_BOOL getVcDiffDecompressPlugin(hpatch_TDecompress* out_decompressP
 #endif
 
 static hpatch_BOOL getDecompressPlugin(const hpatch_compressedDiffInfo* diffInfo,
-                                       hpatch_TDecompress* out_decompressPlugin){
+                                       hpatch_TDecompress* out_decompressPlugin,size_t dec_threadNum){
     const hpatch_TDecompress* decompressPlugin=0;
     memset(out_decompressPlugin,0,sizeof(*out_decompressPlugin));
     if (diffInfo->compressedCount>0){
-        decompressPlugin=__find_decompressPlugin(diffInfo->compressType);
+        decompressPlugin=__find_decompressPlugin(diffInfo->compressType,dec_threadNum);
         if ((0==decompressPlugin)||(decompressPlugin->open==0)) return hpatch_FALSE; //error
     }
     if (decompressPlugin){
         *out_decompressPlugin=*decompressPlugin;
         out_decompressPlugin->decError=hpatch_dec_ok;
+        out_decompressPlugin->dec_threadNum=dec_threadNum;
     }
     return hpatch_TRUE;
 }
@@ -1004,7 +1021,7 @@ static hpatch_BOOL _win_onDiffInfo(struct winpatch_listener_t* listener,const hp
                                    hpatch_BOOL* isChecksumNew,hpatch_BOOL* isChecksumOld,hpatch_BOOL* isChecksumDiff,
                                    unsigned char** out_temp_cache,unsigned char** out_temp_cacheEnd){
     _WinPatchListener_t* ctx=(_WinPatchListener_t*)listener->import;
-    *out_decompressPlugin=ctx->decompressPlugin; //or __find_decompressPlugin()
+    *out_decompressPlugin=ctx->decompressPlugin; //or getDecompressPlugin()
     {//checksum
         *out_checksumPlugin=0;
         *isChecksumNew=hpatch_FALSE;
@@ -1065,7 +1082,7 @@ typedef struct _THDiffInfos{
 
 #define _kUnavailableSize   hpatch_kNullStreamPos
 
-static int _getHDiffInfos(_THDiffInfos* out_diffInfos,const hpatch_TFileStreamInput* diffData){
+static int _getHDiffInfos(_THDiffInfos* out_diffInfos,const hpatch_TFileStreamInput* diffData,size_t dec_threadNum){
     int     result=HPATCH_SUCCESS;
     int     _isInClear=hpatch_FALSE;
     hpatch_TDecompress* decompressPlugin=&out_diffInfos->_decompressPlugin;
@@ -1115,7 +1132,7 @@ static int _getHDiffInfos(_THDiffInfos* out_diffInfos,const hpatch_TFileStreamIn
         check(hpatch_FALSE,HPATCH_HDIFFINFO_ERROR,"is hdiff file? get diffInfo");
     }
     if (decompressPlugin->open==0){
-        if (getDecompressPlugin(diffInfo,decompressPlugin)){
+        if (getDecompressPlugin(diffInfo,decompressPlugin,dec_threadNum)){
         }else{
             LOG_ERR("can not decompress \"%s\" data ERROR!\n",out_diffInfos->diffInfo.compressType);
             check_on_error(HPATCH_COMPRESSTYPE_ERROR);
@@ -1253,7 +1270,7 @@ static int _printFileInfos(const char* fileName,const char* fileTag){
 #endif
     if (!isDirDiff){
         _THDiffInfos diffInfos={0};
-        result=_getHDiffInfos(&diffInfos,&diffData);
+        result=_getHDiffInfos(&diffInfos,&diffData,1);
         if ((result!=HPATCH_SUCCESS)&&(result!=HPATCH_COMPRESSTYPE_ERROR))
             check_on_error(result);
         _printHDiffInfos(&diffInfos,isDirDiff);
@@ -1356,7 +1373,7 @@ static TByte* allocPatchMemCache(hpatch_StreamPos_t kMinCacheSize,hpatch_StreamP
 
 int hpatch(const char* oldFileName,const char* diffFileName,const char* outNewFileName,
            hpatch_BOOL isLoadOldAll,size_t patchCacheSize,hpatch_StreamPos_t diffDataOffset,
-           hpatch_StreamPos_t diffDataSize,TPatchChecksumSet* checksumSet,size_t threadNum){
+           hpatch_StreamPos_t diffDataSize,TPatchChecksumSet* checksumSet,size_t threadNum,size_t dec_threadNum){
     int     result=HPATCH_SUCCESS;
     int     _isInClear=hpatch_FALSE;
     double  time0=clock_s();
@@ -1403,7 +1420,7 @@ int hpatch(const char* oldFileName,const char* diffFileName,const char* outNewFi
     printf("       diffDataSize: %" PRIu64 "\n",diffData.base.streamSize);
 
     {//info
-        int ret=_getHDiffInfos(&diffInfos,&diffData);
+        int ret=_getHDiffInfos(&diffInfos,&diffData,dec_threadNum);
 #if (_IS_NEED_PRINT_LOG)
         if ((ret!=HPATCH_SUCCESS)&&(ret!=HPATCH_COMPRESSTYPE_ERROR))
             check_on_error(ret);
@@ -1540,7 +1557,7 @@ clear:
 int hpatch_dir(const char* oldPath,const char* diffFileName,const char* outNewPath,
                hpatch_BOOL isLoadOldAll,size_t patchCacheSize,size_t kMaxOpenFileNumber,
                TPatchChecksumSet* checksumSet,IHPatchDirListener* hlistener,
-               hpatch_StreamPos_t diffDataOffset,hpatch_StreamPos_t diffDataSize,size_t threadNum){
+               hpatch_StreamPos_t diffDataOffset,hpatch_StreamPos_t diffDataSize,size_t threadNum,size_t dec_threadNum){
     int     result=HPATCH_SUCCESS;
     int     _isInClear=hpatch_FALSE;
     double  time0=clock_s();
@@ -1609,7 +1626,7 @@ int hpatch_dir(const char* oldPath,const char* diffFileName,const char* outNewPa
         hpatch_compressedDiffInfo hdiffInfo;
         hdiffInfo=dirDiffInfo->hdiffInfo;
         hdiffInfo.compressedCount+=(dirDiffInfo->dirDataIsCompressed)?1:0;
-        if(!getDecompressPlugin(&hdiffInfo,decompressPlugin)){
+        if(!getDecompressPlugin(&hdiffInfo,decompressPlugin,dec_threadNum)){
             LOG_ERR("can not decompress \"%s\" data ERROR!\n",hdiffInfo.compressType);
             check_on_error(HPATCH_COMPRESSTYPE_ERROR);
         }

@@ -813,10 +813,14 @@ int _default_setParallelThreadNumber(hdiff_TCompress* compressPlugin,int threadN
 #if (_IsNeedIncludeDefaultCompressHead)
 #   include "MtCoder.h" // "lzma/C/MtCoder.h"   for MTCODER__THREADS_MAX
 #endif
+#ifndef LZMA2DECMT_OUT_BLOCK_MAX_DEFAULT
+#   define LZMA2DECMT_OUT_BLOCK_MAX_DEFAULT  (1<<28) // 256M
+#endif
     struct TCompressPlugin_lzma2{
         hdiff_TCompress base;
         int             compress_level; //0..9
         UInt32          dict_size;      //patch decompress need 4?*lzma_dictSize memory
+        UInt32          block_size;     //1M--256M; 0=AUTO, LZMA2 chunk size, affects decompress parallelism
         int             thread_num;     //1..(64?)
     };
     static int _lzma2_setThreadNumber(hdiff_TCompress* compressPlugin,int threadNum){
@@ -848,7 +852,8 @@ int _default_setParallelThreadNumber(hdiff_TCompress* compressPlugin,int threadN
         props.lzmaProps.level=plugin->compress_level;
         props.lzmaProps.dictSize=dictSize;
         props.lzmaProps.reduceSize=in_data->streamSize;
-        props.blockSize=LZMA2_ENC_PROPS_BLOCK_SIZE_AUTO;
+        props.blockSize=(plugin->block_size==0)?LZMA2_ENC_PROPS_BLOCK_SIZE_AUTO:
+                          (plugin->block_size<LZMA2DECMT_OUT_BLOCK_MAX_DEFAULT)?plugin->block_size:LZMA2DECMT_OUT_BLOCK_MAX_DEFAULT;
         props.numTotalThreads=plugin->thread_num;
         Lzma2EncProps_Normalize(&props);
         if (SZ_OK!=Lzma2Enc_SetProps(s,&props)) _compress_error_return("Lzma2Enc_SetProps()");
@@ -885,7 +890,7 @@ int _default_setParallelThreadNumber(hdiff_TCompress* compressPlugin,int threadN
     _def_fun_compressType(_lzma2_compressType,"lzma2");
     static const TCompressPlugin_lzma2 lzma2CompressPlugin={
         {_lzma2_compressType,_default_maxCompressedSize,_lzma2_setThreadNumber,_lzma2_compress},
-        7,(1<<23),kDefaultCompressThreadNumber};
+        7,(1<<23),0,kDefaultCompressThreadNumber};
 #endif//_CompressPlugin_lzma2
 
 #ifdef  _CompressPlugin_7zXZ
