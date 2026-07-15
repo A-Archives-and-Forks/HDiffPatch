@@ -252,6 +252,7 @@ static const TCover* _get_best_clip(const TCover* cover,const TCover* cover_end,
             hpatch_StreamPos_t gap=_old_gap(c,window);
             hpatch_StreamPos_t clampedGap=std::min(gap,oldWindowSize);
             hpatch_StreamPos_t score_factor=4*oldWindowSize-3*clampedGap;
+            assert(oldWindowSize>0);
             return (hpatch_uint64_t)c->length*score_factor/(8*oldWindowSize);
         }
     }

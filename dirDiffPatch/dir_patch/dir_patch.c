@@ -602,8 +602,11 @@ hpatch_BOOL TDirPatcher_patch(TDirPatcher* self,const hpatch_TStreamOutput* out_
         patchCacheSize_min+=(size_t)self->dirDiffInfo.sdiffInfo.stepMemSize;
 #endif
 #if (_IS_NEED_WINDOW_DIFF)
-    if (self->dirDiffInfo.isWindowDiff)
-        patchCacheSize_min+=(size_t)(self->dirDiffInfo.winDiffInfo.maxWindowOldSize+self->dirDiffInfo.winDiffInfo.maxStepMemSize);
+    if (self->dirDiffInfo.isWindowDiff){
+        hpatch_StreamPos_t wsSize=patchCacheSize_min+self->dirDiffInfo.winDiffInfo.maxWindowOldSize+self->dirDiffInfo.winDiffInfo.maxStepMemSize;
+        check(wsSize==(hpatch_StreamPos_t)(size_t)wsSize);
+        patchCacheSize_min=(size_t)wsSize;
+    }
 #endif
     check(patchCacheSize_min<=(size_t)(temp_cache_end-temp_cache));
     if (self->_checksumSet.isCheck_oldRefData){
