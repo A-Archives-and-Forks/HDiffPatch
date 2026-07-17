@@ -976,7 +976,7 @@ static void __dec_free(void* _, void* address){
 #endif
 #endif
 
-#ifdef _CompressPlugin_lzma2mt
+#if (_CompressPlugin_lzma2mt)
 
 #define kLzma2mtRingBufSize  (1<<22)  // 4MB
 

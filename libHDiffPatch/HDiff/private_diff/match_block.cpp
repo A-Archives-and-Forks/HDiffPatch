@@ -315,7 +315,9 @@ void TOldInvalidFilter::_scanAndSmooth(const hpatch_TStreamInput* oldStream,size
             std::sort(invalidRanges.begin(),invalidRanges.end(),_range_less_by_begin_t());
             size_t backi=0;
             for (size_t i=1;i<invalidRanges.size();++i){
-                if (invalidRanges[i].beginPos<invalidRanges[backi].endPos+rollLen)
+                hpatch_StreamPos_t invlen=std::min(invalidRanges[i].endPos-invalidRanges[i].beginPos,invalidRanges[backi].endPos-invalidRanges[backi].beginPos);
+                hpatch_StreamPos_t skipValidLen=std::min((hpatch_StreamPos_t)R,std::max(invlen/256,(hpatch_StreamPos_t)rollLen*2));
+                if (invalidRanges[i].beginPos<invalidRanges[backi].endPos+skipValidLen)
                     invalidRanges[backi].endPos=std::max(invalidRanges[backi].endPos,invalidRanges[i].endPos);
                 else
                     invalidRanges[++backi]=invalidRanges[i];
@@ -353,6 +355,7 @@ void TMatchBlockBase::_getOldPackedCover(hpatch_StreamPos_t oldDataSize){
                       invalidOldRanges[i].endPos-invalidOldRanges[i].beginPos};
             blockCovers.push_back(c);
         }
+        _on_invalidOldRanges(blockCovers,blockCount,minOldInvalidSize);
     }
     std::sort(blockCovers.begin(),blockCovers.end(),cover_cmp_by_old_t<hpatch_TCover>());
     _getPackedCovers<false>(oldDataSize,blockCovers,packedCoversForOld);
@@ -363,6 +366,17 @@ void TMatchBlockBase::_getNewPackedCover(hpatch_StreamPos_t newDataSize){
     _getPackedCovers<true>(newDataSize,blockCovers,packedCoversForNew);
 }
 
+    static inline hpatch_StreamPos_t _getPackedSize(const std::vector<TPackedCover>& packedCovers){
+        const TPackedCover* cv=packedCovers.empty()?0:&packedCovers[packedCovers.size()-1];
+        return cv?cv->newPos+cv->length:0;
+    }
+hpatch_StreamPos_t TMatchBlockBase::_getTempOldPackedSize(hpatch_StreamPos_t oldDataSize){
+    assert(invalidOldRanges.empty());
+    _getOldPackedCover(oldDataSize);
+    hpatch_StreamPos_t result=_getPackedSize(packedCoversForOld);
+    packedCoversForOld.clear();
+    return result;
+}
     
     static unsigned char* doPackData(unsigned char* data,unsigned char* data_end,
                                      const std::vector<TPackedCover>& packedCovers){
@@ -375,26 +389,26 @@ void TMatchBlockBase::_getNewPackedCover(hpatch_StreamPos_t newDataSize){
         }
         return dst;
     }
+    static inline bool _isBigOldData(hpatch_StreamPos_t oldSize,hpatch_StreamPos_t newSize){
+        return oldSize>std::max((hpatch_StreamPos_t)1<<20,newSize/((oldSize>=(hpatch_StreamPos_t)2<<30)?6:3));
+    }
 void TMatchBlockMem::packData(){
     _getNewPackedCover(newData_end-newData);
     newData_end_cur=doPackData(newData,newData_end,packedCoversForNew);
 
     invalidOldRanges.clear();
-    if (isRemoveOldInvalid){
+    if ((isRemoveOldInvalid && _isBigOldData(_getTempOldPackedSize(oldData_end-oldData),newData_end_cur-newData))){
         hpatch_TStreamInput oldStream;
         mem_as_hStreamInput(&oldStream,oldData,oldData_end);
         TOldInvalidFilter filter(newData,newData_end_cur,&oldStream,blockCovers,threadNum,true);
         invalidOldRanges.swap(filter.getInvalidRanges());
+        minOldInvalidSize=filter.getMinOldInvalidSize();
     }
     _getOldPackedCover(oldData_end-oldData);
     _clearV(invalidOldRanges);
     oldData_end_cur=doPackData(oldData,oldData_end,packedCoversForOld);
 }
 
-    static inline hpatch_StreamPos_t _getPackedSize(const std::vector<TPackedCover>& packedCovers){
-        const TPackedCover* cv=packedCovers.empty()?0:&packedCovers[packedCovers.size()-1];
-        return cv?cv->newPos+cv->length:0;
-    }
     static bool loadPackData(unsigned char* dst_begin,unsigned char* dst_end,
                              const hpatch_TStreamInput* srcStream,const std::vector<TPackedCover>& packedCovers){
         unsigned char* dst=dst_begin;
@@ -418,9 +432,10 @@ void TMatchBlockStream::packData(){
     _check(loadPackData(newData,newData_end_cur,newStream,packedCoversForNew),"loadPackData(newStream) newStream read error!");
 
     invalidOldRanges.clear();
-    if (isRemoveOldInvalid){
+    if (isRemoveOldInvalid&&_isBigOldData(_getTempOldPackedSize(oldStream->streamSize),newData_end_cur-newData)){
         TOldInvalidFilter filter(newData,newData_end_cur,oldStream,blockCovers,mtsets.threadNum,mtsets.oldDataIsMTSafe);
         invalidOldRanges.swap(filter.getInvalidRanges());
+        minOldInvalidSize=filter.getMinOldInvalidSize();
     }
     _getOldPackedCover(oldStream->streamSize);
     _clearV(invalidOldRanges);

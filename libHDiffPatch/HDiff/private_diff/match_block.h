@@ -45,6 +45,7 @@ namespace hdiff_private{
                           size_t R=32, size_t hitRateThreshold=64, //hitRateThreshold percent 0-256
                           size_t cacheBlockSize=(1<<20)); //1MB
         inline std::vector<hdiff_TRange>& getInvalidRanges(){ return invalidRanges; }
+        inline size_t getMinOldInvalidSize()const { return minOldInvalidSize; }
     private:
         void _scanAndSmooth(const hpatch_TStreamInput* oldStream,size_t threadNum,bool oldDataIsMTSafe);
         TFastMatchForSString       bloomFilter;
@@ -62,14 +63,18 @@ namespace hdiff_private{
     struct TMatchBlockBase{
         typedef hpatch_TCover TPackedCover;
         TMatchBlockBase(size_t _matchBlockSize,size_t _threadNum)
-        :matchBlockSize(_matchBlockSize),threadNum(_threadNum){}
+        :matchBlockSize(_matchBlockSize),threadNum(_threadNum),minOldInvalidSize(0){}
 		inline void swapBlockCovers(std::vector<TCover>& _blockCovers){ blockCovers.swap(_blockCovers); }
     protected:
         void _getNewPackedCover(hpatch_StreamPos_t newDataSize);
         void _getOldPackedCover(hpatch_StreamPos_t oldDataSize);
+        hpatch_StreamPos_t _getTempOldPackedSize(hpatch_StreamPos_t oldDataSize);
+        virtual void _on_invalidOldRanges(std::vector<TCover>& curBlockCovers,size_t invalidBegin,
+                                          size_t minOldInvalidSize){ }
         void _unpackData(IDiffInsertCover* diffi,hpatch_TCover*& pcovers,size_t& coverCount);
         const size_t   matchBlockSize;
         const size_t   threadNum;
+        size_t minOldInvalidSize;
         std::vector<TCover> blockCovers;
         std::vector<TPackedCover> packedCoversForOld;
         std::vector<TPackedCover> packedCoversForNew;
@@ -161,7 +166,7 @@ namespace hdiff_private{
     struct TCoversOptimMem:public TCoversOptim<TMatchBlockMem>{
         TCoversOptimMem(unsigned char* newData,unsigned char* newData_end,
                        unsigned char* oldData,unsigned char* oldData_end,
-                       size_t matchBlockSize,size_t threadNum,bool isRemoveOldInvalid=false)
+                       size_t matchBlockSize,size_t threadNum,bool isRemoveOldInvalid)
         :TCoversOptim<TMatchBlockMem>(&_matchBlock),
          _matchBlock(newData,newData_end,oldData,oldData_end,matchBlockSize,threadNum,isRemoveOldInvalid){
             matchBlock->getBlockCovers();
