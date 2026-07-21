@@ -125,12 +125,18 @@ int hpatch_printPath_utf8(const char* pathTxt_utf8){
 #endif
 }
 
+#if (_IS_USED_WIN32_UTF8_WAPI)
+int _hpatch_printStdErrPath_wstr(const wchar_t* pathTxt_wchar){
+    return LOG_ERR("%ls",pathTxt_wchar);
+}
+#endif
+
 int hpatch_printStdErrPath_utf8(const char* pathTxt_utf8){
 #if (_IS_USED_WIN32_UTF8_WAPI)
     wchar_t pathTxt_w[hpatch_kPathMaxSize];
     int wsize=_utf8FileName_to_w(pathTxt_utf8,pathTxt_w,hpatch_kPathMaxSize);
     if (wsize>0)
-        return LOG_ERR("%ls",pathTxt_w);
+        return _hpatch_printStdErrPath_wstr(pathTxt_w);
     else //view unknow
         return LOG_ERR("%s",pathTxt_utf8);
 #else
@@ -518,6 +524,17 @@ hpatch_FileHandle __import_fileOpen(const char* fileName_utf8,_FileModeType mode
 hpatch_force_inline static
 hpatch_FileHandle _import_fileOpen(const char* fileName_utf8,_FileModeType mode){
     hpatch_FileHandle result=__import_fileOpen(fileName_utf8,mode); 
+    if (result==0){
+    #if (_IS_USED_WIN32_UTF8_WAPI)
+        LOG_ERR("fopen fail, errno:%d, openmode:\"",errno);
+        _hpatch_printStdErrPath_wstr(mode);
+        LOG_ERR("\", filename:\"");
+        hpatch_printStdErrPath_utf8(fileName_utf8);
+        LOG_ERR("\"\n");
+    #else
+        LOG_ERR("fopen fail, errno:%d, openmode:\"%s\", filename:\"%s\"\n",errno,mode,fileName_utf8);
+    #endif
+    }
     //used default vbuf?  if (result) setvbuf(result,0,_IONBF,0);
     return result;
 }

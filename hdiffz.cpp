@@ -296,8 +296,10 @@ static void printUsage(){
 #   endif
 #endif
 #ifdef _CompressPlugin_lzma2
-           "        -c-lzma2[-{0..9}[-dictSize]]    DEFAULT level 7\n"
-           "            dictSize can like 4096 or 4k or 4m or 128m etc..., DEFAULT 8m\n"
+           "        -c-lzma2[-{0..9}[-dictSize[-blockSize]]]    DEFAULT level 7\n"
+           "            dictSize can like 4096 or 4k or 4m or 128m etc..., DEFAULT 8m;\n"
+               "        1m<=blockSize<=256m, DEFAULT 0 (AUTO) ...;\n"
+               "          recommend blockSize==dictSize when need decompress by multi-thread;\n"
 #   if (_IS_USED_MULTITHREAD)
            "            support run by multi-thread parallel, fast!\n"
 #   endif
@@ -673,7 +675,8 @@ static hpatch_BOOL _getOptChecksum(hpatch_TChecksum** out_checksumPlugin,
 static bool _tryGetCompressSet(const char** isMatchedType,const char* ptype,const char* ptypeEnd,
                                const char* cmpType,const char* cmpType2=0,
                                size_t* compressLevel=0,size_t levelMin=0,size_t levelMax=0,size_t levelDefault=0,
-                               size_t* dictSize=0,size_t dictSizeMin=0,size_t dictSizeMax=0,size_t dictSizeDefault=0){
+                               size_t* dictSize=0,size_t dictSizeMin=0,size_t dictSizeMax=0,size_t dictSizeDefault=0,
+                               size_t* blockSize=0){
     assert (0==(*isMatchedType));
     const size_t ctypeLen=strlen(cmpType);
     const size_t ctype2Len=(cmpType2!=0)?strlen(cmpType2):0;
@@ -695,9 +698,18 @@ static bool _tryGetCompressSet(const char** isMatchedType,const char* ptype,cons
             if (!kmg_to_size(pdictSize,pdictSizeEnd-pdictSize,dictSize)) return false; //error
             if (*dictSize<dictSizeMin) *dictSize=dictSizeMin;
             else if (*dictSize>dictSizeMax) *dictSize=dictSizeMax;
+            if (blockSize && (pdictSizeEnd[0]=='-')){
+                const char* pblockSize=pdictSizeEnd+1;
+                const char* pblockSizeEnd=findUntilEnd(pblockSize,'-');
+                if (pblockSizeEnd[0]!='\0') return false;
+                if (!kmg_to_size(pblockSize,pblockSizeEnd-pblockSize,blockSize)) return false;
+            }else if (pdictSizeEnd[0]!='\0'){
+                return false;
+            }
         }else{
             if (plevelEnd[0]!='\0') return false; //error
             if (dictSize) *dictSize=(dictSizeDefault<dictSizeMax)?dictSizeDefault:dictSizeMax;
+            if (blockSize) *blockSize=0;
         }
     }else{
         if (ptypeEnd[0]!='\0') return false; //error
@@ -788,12 +800,15 @@ static int _checkSetCompress(hdiff_TCompress** out_compressPlugin,
         *out_compressPlugin=&_lzmaCompressPlugin.base; }}
 #endif
 #ifdef _CompressPlugin_lzma2
+    size_t blockSize=0; //0=AUTO
     __getCompressSet(_tryGetCompressSet(&isMatchedType,ptype,ptypeEnd,"lzma2",0,
                                         &compressLevel,0,9,7, &dictSize,1<<12,
-                                        (sizeof(size_t)<=4)?(1<<27):((size_t)3<<29),defaultDictSize),"-c-lzma2-?"){
+                                        (sizeof(size_t)<=4)?(1<<27):((size_t)3<<29),defaultDictSize,
+                                        &blockSize),"-c-lzma2-?"){
         static TCompressPlugin_lzma2 _lzma2CompressPlugin=lzma2CompressPlugin;
         _lzma2CompressPlugin.compress_level=(int)compressLevel;
         _lzma2CompressPlugin.dict_size=(UInt32)dictSize;
+        _lzma2CompressPlugin.block_size=(blockSize==(UInt32)blockSize)?(UInt32)blockSize:~(UInt32)0;
         *out_compressPlugin=&_lzma2CompressPlugin.base; }}
 #endif
 #ifdef _CompressPlugin_lz4

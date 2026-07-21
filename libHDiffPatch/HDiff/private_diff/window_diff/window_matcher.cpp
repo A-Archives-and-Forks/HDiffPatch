@@ -141,8 +141,8 @@ void extenWindowsForMatch(std::vector<hpatch_TWindow>& windows,hpatch_StreamPos_
         assert(window.newLength>0);
         if (window.oldLength==0) continue;
         _extenPos(window.oldPos,window.oldLength,oldWindowSize,0,oldSize,kExtenPosSize);
-        hpatch_StreamPos_t newLimitPosEnd=(i+1<windows.size())?
-                                (window.newPos+window.newLength+windows[i+1].newPos)/2:newSize;
+        hpatch_StreamPos_t newLimitPosEnd=window.newPos+window.newLength;
+        newLimitPosEnd=(i+1<windows.size())?newLimitPosEnd+(windows[i+1].newPos-newLimitPosEnd)/2:newSize;
         _extenPos(window.newPos,window.newLength,newWindowSize,newPosEndBck,newLimitPosEnd,kExtenPosSize);
         newPosEndBck=window.newPos+window.newLength;
     }

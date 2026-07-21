@@ -239,6 +239,7 @@ static hpatch_force_inline hpatch_StreamPos_t _hpatch_pos_max(hpatch_StreamPos_t
                                           hpatch_StreamPos_t code_begin,
                                           hpatch_StreamPos_t code_end);
         volatile hpatch_dec_error_t decError; //if decError is read, each patch session must use its own hpatch_TDecompress instance
+        size_t                      dec_threadNum; //for multi-thread decompress, <=1 means single thread (default)
     } hpatch_TDecompress;
     #define _hpatch_update_decError(decompressPlugin,errorCode) \
         do { if ((decompressPlugin)->decError==hpatch_dec_ok)   \

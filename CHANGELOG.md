@@ -2,6 +2,12 @@
 
 full changelog at: https://github.com/sisong/HDiffPatch/commits   
 
+## [v5.1.0](https://github.com/sisong/HDiffPatch/tree/v5.1.0) - 2026-07-14
+### Added
+* optimize `$hdiffz -m` required memory size when oldData different newData;
+   default opened by diff with -block or -cache opened;
+* add lzma2mtDecompressPlugin, support lzma2 decompress by multi-thread;
+
 ## [v5.0.0](https://github.com/sisong/HDiffPatch/tree/v5.0.0) - 2026-06-25
 ### Added
 * add new format Window Diff(`HDIFFW26`) for optimize patch speed, by `$hdiffz -WD[-stepSize]`;

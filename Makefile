@@ -119,7 +119,8 @@ ifeq ($(LZMA),1)
   ifeq ($(MT),0)  
   else  
     HPATCH_OBJ+=$(LZMA_PATH)/MtDec.o \
-				$(LZMA_PATH)/Threads.o
+				$(LZMA_PATH)/Threads.o \
+				$(LZMA_PATH)/Lzma2DecMt.o
   endif
   HDIFF_OBJ  += $(LZMA_PATH)/LzFind.o \
   				$(LZMA_PATH)/LzFindOpt.o \

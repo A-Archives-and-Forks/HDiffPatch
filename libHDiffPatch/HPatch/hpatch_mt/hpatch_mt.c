@@ -141,7 +141,8 @@ hpatchMTSets_t _hpatch_getMTSets(hpatch_StreamPos_t newSize,hpatch_StreamPos_t o
     if (oldSize<1*(1<<17)) mtsets.readOld_isMT=0;
     if ((diffSize<(newSize+oldSize)/256)||(diffSize<(1<<17))) mtsets.readDiff_isMT=0;
 #endif
-    if (decompressPlugin==0) mtsets.decompressDiff_isMT=0;
+    hpatch_BOOL isNotDecompressMT=(decompressPlugin==0)||((decompressPlugin->dec_threadNum>1)&&decompressPlugin->is_can_open("lzma2"));
+    if (isNotDecompressMT) mtsets.decompressDiff_isMT=0;
     if (mtsets.readOld_isMT){// is can cache all old?
         size_t workBufCount,objsMemSize,kMinTempCacheSize;
         hpatchMTSets_t _mtsets=mtsets; _mtsets.readOld_isMT=0;
@@ -207,7 +208,7 @@ hpatchMTSets_t _hpatch_getMTSets(hpatch_StreamPos_t newSize,hpatch_StreamPos_t o
 #endif
         mtsets=*(hpatchMTSets_t*)disThreads;
     }
-    if ((decompressPlugin!=0)&&(mtsets.readDiff_isMT!=0)&&(!mtsets.decompressDiff_isMT)){
+    if ((!isNotDecompressMT)&&(mtsets.readDiff_isMT!=0)&&(!mtsets.decompressDiff_isMT)){
         mtsets.readDiff_isMT=0;
         mtsets.decompressDiff_isMT=1;
     }

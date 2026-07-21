@@ -1096,6 +1096,7 @@ TWindowDiffStream::TWindowDiffStream(const hpatch_TStreamInput* newStream,const 
     outMaxWindowOldLength=0;
     for (size_t wi=0;wi<windows.size();++wi)
         outMaxWindowOldLength=std::max(outMaxWindowOldLength,windows[wi].oldLength);
+    check(outMaxWindowOldLength==(hpatch_StreamPos_t)(size_t)outMaxWindowOldLength);
     _oldStreamMem.realloc((size_t)outMaxWindowOldLength);
     _stepStreamMem.realloc(sizeof(TStepStream));
     _windowDatas.resize(windows.size());

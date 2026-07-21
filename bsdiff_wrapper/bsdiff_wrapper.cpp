@@ -57,7 +57,7 @@ namespace hdiff_private{
         :curPos(0),curi(0),bufi(0),covers(_covers){
             streamImport=this;
             read=_read;
-            streamSize=(covers.size()-1)*(hpatch_StreamPos_t)(3*8);
+            streamSize=(covers.size()>1)?((hpatch_StreamPos_t)covers.size()-1)*(3*8):0;
             buf.reserve(hdiff_kFileIOBufBestSize);
         }
     private:

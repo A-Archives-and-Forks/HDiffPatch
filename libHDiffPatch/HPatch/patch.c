@@ -2860,6 +2860,7 @@ static const size_t _kWindowCacheCount=_kCacheSgCount;
             if (!_read_sign_pos_byLastPos(clip,&lastOldPos)) return _hpatch_FALSE;
 #if (defined __RUN_MEM_SAFE_CHECK)
             if (len>maxWindowOldSize) return _hpatch_FALSE;
+            if (len!=(hpatch_StreamPos_t)(hpatch_size_t)len) return _hpatch_FALSE;
             if (lastOldPos>oldSize) return _hpatch_FALSE;
             if (lastOldPos+len>oldSize) return _hpatch_FALSE;
 #endif
@@ -2898,7 +2899,7 @@ static hpatch_BOOL _patch_window_diff(const hpatch_TStreamOutput* out_newData,co
                                       hpatch_TChecksum* checksumPlugin,hpatch_checksumHandle checksumHandle_old,
                                       unsigned char* temp_cache,unsigned char* temp_cache_end,
                                       size_t maxThreadNum,hpatchMTSets_t hpatchMTSets){
-    hpatch_size_t    windowOldBufSize=(hpatch_size_t)diffInfo->maxWindowOldSize;
+    const hpatch_size_t    windowOldBufSize=(hpatch_size_t)diffInfo->maxWindowOldSize;
     const hpatch_size_t    stepMemSize=(hpatch_size_t)diffInfo->maxStepMemSize;
     const hpatch_StreamPos_t windowCount=diffInfo->windowCount;
     const hpatch_StreamPos_t metaCount=diffInfo->windowMetaCount;
@@ -2933,6 +2934,10 @@ static hpatch_BOOL _patch_window_diff(const hpatch_TStreamOutput* out_newData,co
     assert(diffStream->read!=0);
     assert(diffInfo!=0);
     assert(((checksumHandle_old==0)&&(checksumPlugin==0))||((checksumHandle_old!=0)&&(checksumPlugin!=0)));
+#if (defined __RUN_MEM_SAFE_CHECK)
+    if (diffInfo->maxWindowOldSize!=(hpatch_StreamPos_t)(hpatch_size_t)diffInfo->maxWindowOldSize) return _hpatch_FALSE;
+    if (diffInfo->maxStepMemSize!=(hpatch_StreamPos_t)(hpatch_size_t)diffInfo->maxStepMemSize) return _hpatch_FALSE;
+#endif
 
     if (diffInfo->compressedSize==0){
         decompressPlugin=0;
@@ -2962,6 +2967,9 @@ static hpatch_BOOL _patch_window_diff(const hpatch_TStreamOutput* out_newData,co
         assert((size_t)(temp_cache_end-temp_cache)>=windowOldBufSize+stepMemSize+hpatch_kStreamCacheSize*kCacheCount);
         oldBuf=temp_cache; temp_cache+=windowOldBufSize;
     }
+#if (defined __RUN_MEM_SAFE_CHECK)
+    if ((size_t)(temp_cache_end-temp_cache)<stepMemSize+hpatch_kStreamCacheSize*kCacheCount) { result=_hpatch_FALSE; goto _clear; }
+#endif
     if (decompressPlugin){
         if (!compressed_stream_as_uncompressed(&uncompressedStream,diffInfo->uncompressedSize,decompressPlugin,diffStream,
                                                diffData_pos,diffData_posEnd)) { result=_hpatch_FALSE; goto _clear; }
@@ -2981,7 +2989,7 @@ static hpatch_BOOL _patch_window_diff(const hpatch_TStreamOutput* out_newData,co
 #endif
 
     // Remaining temp_cache for stream caches
-    cacheSize=(hpatch_size_t)(temp_cache_end-temp_cache-stepMemSize)/kCacheCount;
+    cacheSize=(hpatch_size_t)((temp_cache_end-temp_cache)-stepMemSize)/kCacheCount;
     if (cacheSize<hpatch_kStreamCacheSize) { result=_hpatch_FALSE; goto _clear; }
 
     // Initialize mainClip for reading window data

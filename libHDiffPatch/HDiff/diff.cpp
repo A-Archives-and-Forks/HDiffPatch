@@ -72,22 +72,21 @@ static const int kMinMatchScore = 2; //min match benefit threshold for cover sea
 static const hpatch_uint64_t kDefaultLimitCoverLen=((hpatch_uint64_t)1<<30); //<=2GB-1
 
 namespace hdiff_private{
-    void loadOldAndNewStream(TAutoMem& out_mem,const hpatch_TStreamInput* oldStream,hpatch_StreamPos_t oldPos,size_t old_size,
-                             const hpatch_TStreamInput* newStream,hpatch_StreamPos_t newPos,size_t new_size){
-        if (old_size>0) assert(oldPos+old_size<=oldStream->streamSize);
-        assert(newPos+new_size<=newStream->streamSize);
-        if (sizeof(size_t)<sizeof(hpatch_StreamPos_t))
-            check(old_size+new_size==(hpatch_StreamPos_t)old_size+new_size);
+    void loadOldAndNewStream(TAutoMem& out_mem,const hpatch_TStreamInput* oldStream,hpatch_StreamPos_t old_off,hpatch_StreamPos_t _old_size,
+                             const hpatch_TStreamInput* newStream,hpatch_StreamPos_t new_off,hpatch_StreamPos_t _new_size){
+        size_t old_size=(size_t)_old_size;
+        size_t new_size=(size_t)_new_size;
+        if (sizeof(hpatch_StreamPos_t)>sizeof(size_t))
+            check((new_size==_new_size)&&(old_size==_old_size));
+        check(old_size<=(size_t)((~(size_t)0)-new_size));
         out_mem.realloc(old_size+new_size);
-        if (old_size) check(oldStream->read(oldStream,oldPos,out_mem.data(),out_mem.data()+old_size));
-        check(newStream->read(newStream,newPos,out_mem.data()+old_size,out_mem.data()+old_size+new_size));
+        if (old_size) check(oldStream->read(oldStream,old_off,out_mem.data(),out_mem.data()+old_size));
+        check(newStream->read(newStream,new_off,out_mem.data()+old_size,out_mem.data()+old_size+new_size));
     }
     void loadOldAndNewStream(TAutoMem& out_mem,const hpatch_TStreamInput* oldStream,const hpatch_TStreamInput* newStream){
         _out_diff_info("  load all datas into memory from old & new ...\n");
-        if (oldStream) check((size_t)oldStream->streamSize==(size_t)oldStream->streamSize);
-        check((size_t)newStream->streamSize==(size_t)newStream->streamSize);
-        loadOldAndNewStream(out_mem, oldStream,0,oldStream?(size_t)oldStream->streamSize:0,
-                            newStream,0,(size_t)newStream->streamSize);
+        loadOldAndNewStream(out_mem, oldStream,0,oldStream?oldStream->streamSize:0,
+                            newStream,0,newStream->streamSize);
     }
 }
 
@@ -1362,7 +1361,8 @@ void get_match_covers_by_stream_and_sstring(const hpatch_TStreamInput* newData,c
                                             int kMinSingleMatchScore,bool isUseBigCacheMatch,const hdiff_TMTSets_s* mtsets,
                                             bool isExtendCover,TCachedNewOldStreams* out_cachedStreams){
     mtsets=mtsets?mtsets:&hdiff_TMTSets_s_kEmpty;
-    if (fastMatchBlockSize==0){
+    bool isRemoveOldInvalid=(fastMatchBlockSize>0)||isUseBigCacheMatch;
+    if ((fastMatchBlockSize==0)&&(!isRemoveOldInvalid)){
         TCachedNewOldStreams cachedStreams;
         cachedStreams.freeCached=_free_TCachedMemStreams;
         cachedStreams.import=new _TCachedMemStreams();
@@ -1386,7 +1386,7 @@ void get_match_covers_by_stream_and_sstring(const hpatch_TStreamInput* newData,c
 
     TCachedNewOldStreams cachedStreams;
     cachedStreams.freeCached=_free_TCoversOptimStream;
-    cachedStreams.import=new TCoversOptimStream(newData,oldData,fastMatchBlockSize,mtsets->threadNum,mtsets->threadNumForSearch);
+    cachedStreams.import=new TCoversOptimStream(newData,oldData,fastMatchBlockSize,mtsets,isRemoveOldInvalid);
     TCoversOptimStream& coversOp=*(TCoversOptimStream*)cachedStreams.import;
     get_match_covers_by_sstring(coversOp.matchBlock->newData,coversOp.matchBlock->newData_end_cur,
                                 coversOp.matchBlock->oldData,coversOp.matchBlock->oldData_end_cur,
@@ -1403,12 +1403,14 @@ void get_match_covers_by_stream_and_sstring(unsigned char* newData,unsigned char
                                             std::vector<TCover>& out_covers,size_t fastMatchBlockSize,
                                             int kMinSingleMatchScore,bool isUseBigCacheMatch,
                                             size_t threadNum,bool isExtendCover){
-    if (fastMatchBlockSize==0){
+    bool isRemoveOldInvalid=(fastMatchBlockSize>0)||isUseBigCacheMatch;
+    if ((fastMatchBlockSize==0)&&(!isRemoveOldInvalid)){
         get_match_covers_by_sstring(newData,newData_end,oldData,oldData_end,out_covers,
                                     kMinSingleMatchScore,isUseBigCacheMatch,threadNum,isExtendCover);
         return;
     }
-    TCoversOptimMem coversOp(newData,newData_end,oldData,oldData_end,fastMatchBlockSize,threadNum);
+    TCoversOptimMem coversOp(newData,newData_end,oldData,oldData_end,fastMatchBlockSize,
+                             threadNum,isRemoveOldInvalid);
     get_match_covers_by_sstring(coversOp.matchBlock->newData,coversOp.matchBlock->newData_end_cur,
                                 coversOp.matchBlock->oldData,coversOp.matchBlock->oldData_end_cur,
                                 out_covers,kMinSingleMatchScore,isUseBigCacheMatch,
@@ -2179,8 +2181,7 @@ void get_match_covers_in_a_window(const hpatch_TStreamInput* newData,const hpatc
     }
 
     TAutoMem mem;
-    loadOldAndNewStream(mem,oldData,window.oldPos,(size_t)window.oldLength,
-                        newData,window.newPos,(size_t)window.newLength);
+    loadOldAndNewStream(mem,oldData,window.oldPos,window.oldLength,newData,window.newPos,window.newLength);
     unsigned char* pOldData=mem.data();
     unsigned char* pNewData=pOldData+window.oldLength;
     if (!bigCovers.empty()) {
