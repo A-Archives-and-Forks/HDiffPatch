@@ -854,7 +854,14 @@ int hpatch_cmd_line(int argc, const char * argv[]){
 
 #define _try_rt_dec(dec) { if (dec.is_can_open(compressType)) return &dec; }
 
-static const hpatch_TDecompress* __find_decompressPlugin(const char* compressType,size_t dec_threadNum){
+static const hpatch_TDecompress* __find_mt_decompressPlugin(const char* compressType){
+#ifdef  _CompressPlugin_lzma2mt
+    _try_rt_dec(lzma2mtDecompressPlugin);
+#endif
+    return 0;
+}
+
+static const hpatch_TDecompress* __find_decompressPlugin(const char* compressType){
 #if ((defined(_CompressPlugin_ldef))&&_IS_NEED_decompressor_ldef_replace_zlib)
     _try_rt_dec(ldefDecompressPlugin);
 #else
@@ -867,9 +874,6 @@ static const hpatch_TDecompress* __find_decompressPlugin(const char* compressTyp
 #endif
 #ifdef  _CompressPlugin_lzma
     _try_rt_dec(lzmaDecompressPlugin);
-#endif
-#ifdef  _CompressPlugin_lzma2mt
-    if (dec_threadNum>1) _try_rt_dec(lzma2mtDecompressPlugin);
 #endif
 #ifdef  _CompressPlugin_lzma2
     _try_rt_dec(lzma2DecompressPlugin);
@@ -926,15 +930,21 @@ static hpatch_BOOL getVcDiffDecompressPlugin(hpatch_TDecompress* out_decompressP
 static hpatch_BOOL getDecompressPlugin(const hpatch_compressedDiffInfo* diffInfo,
                                        hpatch_TDecompress* out_decompressPlugin,size_t dec_threadNum){
     const hpatch_TDecompress* decompressPlugin=0;
+    hpatch_BOOL isMtDec=hpatch_FALSE;
     memset(out_decompressPlugin,0,sizeof(*out_decompressPlugin));
     if (diffInfo->compressedCount>0){
-        decompressPlugin=__find_decompressPlugin(diffInfo->compressType,dec_threadNum);
+        if (dec_threadNum>1){
+            decompressPlugin=__find_mt_decompressPlugin(diffInfo->compressType);
+            isMtDec=(decompressPlugin!=0);
+        }
+        if (0==decompressPlugin)
+            decompressPlugin=__find_decompressPlugin(diffInfo->compressType);
         if ((0==decompressPlugin)||(decompressPlugin->open==0)) return hpatch_FALSE; //error
     }
     if (decompressPlugin){
         *out_decompressPlugin=*decompressPlugin;
         out_decompressPlugin->decError=hpatch_dec_ok;
-        out_decompressPlugin->dec_threadNum=dec_threadNum;
+        out_decompressPlugin->dec_threadNum=isMtDec?dec_threadNum:1;
     }
     return hpatch_TRUE;
 }
