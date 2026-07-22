@@ -33,6 +33,7 @@
 #include "hpatch_mt/hpatch_mt.h"
 #if (_HPATCH_IS_USED_MULTITHREAD)
 #   include "hpatch_mt/_hcache_window_old_mt.h"
+#   include "hpatch_mt/_hinput_mt.h"
 #endif
 
 #ifndef _IS_RUN_MEM_SAFE_CHECK
@@ -2045,15 +2046,28 @@ hpatch_BOOL patch_decompress_with_cache(const hpatch_TStreamOutput* out_newData,
                                         const hpatch_TStreamInput*  compressedDiff,
                                         hpatch_TDecompress* decompressPlugin,
                                         TByte* temp_cache,TByte* temp_cache_end){
-    hpatch_BOOL     result;
+    hpatch_BOOL     result=hpatch_TRUE;
     hpatch_TCovers* covers=0; //need close before return
     hpatch_BOOL    isReadError=hpatch_FALSE;
+#if (_HPATCH_IS_USED_MULTITHREAD)
+    hinput_mt_safe_t _safeDiff;
+    hpatch_TStreamInput* psafeDiff=0;
+    if (decompressPlugin && (decompressPlugin->dec_threadNum>1)){
+        psafeDiff=hinput_mt_safe_open(&_safeDiff,compressedDiff);
+        if (!psafeDiff){ result=_hpatch_FALSE; goto _clear; }
+        compressedDiff=psafeDiff;
+    }
+#endif
     _patch_cache(&covers,&oldData,out_newData->streamSize,compressedDiff,hpatch_TRUE,
                  decompressPlugin,_kCacheDecCount,&temp_cache,&temp_cache_end,&isReadError);
-    if (isReadError) return _hpatch_FALSE;
+    if (isReadError){ result=_hpatch_FALSE; goto _clear; }
     result=_patch_decompress_cache(out_newData,oldData,compressedDiff,decompressPlugin,
                                    covers,temp_cache,temp_cache_end);
+_clear:
     if ((covers!=0)&&(!covers->close(covers))) result=_hpatch_FALSE;
+#if (_HPATCH_IS_USED_MULTITHREAD)
+    if (psafeDiff) hinput_mt_safe_close(psafeDiff);
+#endif
     return result;
 }
 

@@ -151,4 +151,37 @@ hpatch_BOOL hinput_mt_close(hpatch_TStreamInput* hinput_mt_stream){
     return result;
 }
 
+
+static hpatch_BOOL hinput_mt_safe_read_(const hpatch_TStreamInput* stream,hpatch_StreamPos_t readFromPos,
+                                        unsigned char* out_data,unsigned char* out_data_end){
+    hinput_mt_safe_t* self=(hinput_mt_safe_t*)stream->streamImport;
+    hpatch_BOOL result;
+    c_locker_enter(self->locker);
+    result=self->base_stream->read(self->base_stream,readFromPos,out_data,out_data_end);
+    c_locker_leave(self->locker);
+    return result;
+}
+
+
+hpatch_TStreamInput* hinput_mt_safe_open(hinput_mt_safe_t* self,const hpatch_TStreamInput* base_stream){
+    memset(self,0,sizeof(*self));
+    self->base.streamImport=self;
+    self->base.streamSize=base_stream->streamSize;
+    self->base.read=hinput_mt_safe_read_;
+    self->base_stream=base_stream;
+    self->locker=c_locker_new();
+    if (!self->locker) return 0;
+    return &self->base;
+}
+
+hpatch_BOOL hinput_mt_safe_close(hpatch_TStreamInput* hinput_mt_safe_stream){
+    hinput_mt_safe_t* self;
+    if (!hinput_mt_safe_stream) return hpatch_TRUE;
+    self=(hinput_mt_safe_t*)hinput_mt_safe_stream->streamImport;
+    if (!self) return hpatch_TRUE;
+    hinput_mt_safe_stream->streamImport=0;
+    if (self->locker) c_locker_delete(self->locker);
+    return hpatch_TRUE;
+}
+
 #endif //_IS_USED_MULTITHREAD

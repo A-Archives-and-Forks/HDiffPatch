@@ -47,6 +47,19 @@ hpatch_TStreamInput* hinput_dec_mt_open(void* pmem,size_t memSize,struct hpatch_
 
 hpatch_BOOL          hinput_mt_close(hpatch_TStreamInput* hinput_mt_stream);
 
+
+//thread-safe stream wrapper:
+//  only lock read call to keep multi-thread safe,
+//  don't start thread or check read position (different from hinput_mt_open)
+typedef struct hinput_mt_safe_t{
+    hpatch_TStreamInput         base;
+    const hpatch_TStreamInput*  base_stream;
+    HLocker                     locker;
+} hinput_mt_safe_t;
+
+hpatch_TStreamInput* hinput_mt_safe_open(hinput_mt_safe_t* self,const hpatch_TStreamInput* base_stream);
+hpatch_BOOL          hinput_mt_safe_close(hpatch_TStreamInput* hinput_mt_safe_stream);
+
 #endif //_IS_USED_MULTITHREAD
 #ifdef __cplusplus
 }
