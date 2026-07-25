@@ -2,7 +2,11 @@
 
 full changelog at: https://github.com/sisong/HDiffPatch/commits   
 
-## [v5.1.1](https://github.com/sisong/HDiffPatch/tree/v5.1.1) - 2026-07-23
+## [v5.1.2](https://github.com/sisong/HDiffPatch/tree/v5.1.1) - 2026-07-26
+### Fixed
+* fix a patch fail, at serialize WD when compress 'fail' and cancel;
+
+## [v5.1.1](https://github.com/sisong/HDiffPatch/tree/v5.1.1) - 2026-07-22
 ### Fixed
 * fix support multi-thread lzma2 decompress when patch multi-compression stream differential;
 

@@ -1,5 +1,5 @@
 # [HDiffPatch]
-[![release](https://img.shields.io/badge/release-v5.1.1-blue.svg)](https://github.com/sisong/HDiffPatch/releases) 
+[![release](https://img.shields.io/badge/release-v5.1.2-blue.svg)](https://github.com/sisong/HDiffPatch/releases) 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/sisong/HDiffPatch/blob/master/LICENSE) 
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blue.svg)](https://github.com/sisong/HDiffPatch/pulls)
 [![+issue Welcome](https://img.shields.io/github/issues-raw/sisong/HDiffPatch?color=green&label=%2Bissue%20welcome)](https://github.com/sisong/HDiffPatch/issues)   
@@ -182,8 +182,10 @@ make -j
         -c-lzma[-{0..9}[-dictSize]]     默认级别 7
             压缩字典大小dictSize可以设置为 4096, 4k, 4m, 128m等, 默认为8m
             支持2个线程并行压缩。
-        -c-lzma2[-{0..9}[-dictSize]]    默认级别 7
+        -c-lzma2[-{0..9}[-dictSize[-blockSize]]]    默认级别 7
             压缩字典大小dictSize可以设置为 4096, 4k, 4m, 128m等, 默认为8m
+            1m<=blockSize<=256m, 默认 0 (自动) ...
+              当需要多线程并行解压时，推荐设置blockSize和dictSize相等。
             支持多线程并行压缩,很快。
             警告: lzma和lzma2是不同的压缩编码格式。
         -c-zstd[-{0..22}[-dictBits]]    默认级别 20
@@ -280,6 +282,9 @@ make -j
       设置线程数 parallelThreadNumber>1 时,开启多线程并行模式;
       当前支持单压缩流补丁文件(用hdiffz -SD-stepSize创建)和window diff格式补丁文件(用hdiffz -WD所创建);
       可以设置值 1..5, 默认 -p-1 (即单线程)!
+  -p-dec-decThreadNumber
+      如果设置线程数 decThreadNumber>1 时，开启多线程并行解压缩模式, 默认 -p-dec-1 (即单线程)!
+      当前只支持 lzma2 并带有blockSize压缩的补丁包; 注意: 并行解压缩执行时需要较多的内存!
   -C-checksumSets
       为窗口补丁、文件夹补丁、VCDIFF补丁设置校验方式, 默认设置为 -C-new-copy;
       校验设置支持(可以多选):
