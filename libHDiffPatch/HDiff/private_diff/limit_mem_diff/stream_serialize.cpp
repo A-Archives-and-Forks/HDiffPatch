@@ -779,7 +779,8 @@ void TDiffStream::_pushStream(const hpatch_TStreamInput* stream){
 hpatch_StreamPos_t TDiffStream::pushStream(const hpatch_TStreamInput* stream,
                                            const hdiff_TCompress* compressPlugin,
                                            const TPlaceholder& update_compress_sizePos,
-                                           bool isMustCompress,const hpatch_StreamPos_t cancelSizeOnCancelCompress){
+                                           bool isMustCompress,const hpatch_StreamPos_t cancelSizeOnCancelCompress,
+                                           bool* out_isCanceledCompress){
     hpatch_StreamPos_t compressed_size=0;
     check(writePos>=cancelSizeOnCancelCompress);
     check(stream->streamSize>=cancelSizeOnCancelCompress);
@@ -793,6 +794,7 @@ hpatch_StreamPos_t TDiffStream::pushStream(const hpatch_TStreamInput* stream,
                 checki(0,"TDiffStream::pushStream() compress failed: maxCompressedSize() too small or compressPlugin returned 0 (must compress).");
             }
             compressed_size=0;//NOTICE: compress is canceled
+            if (out_isCanceledCompress) *out_isCanceledCompress=true;
         }else{
             writePos+=compressed_size; //compress ok
         }

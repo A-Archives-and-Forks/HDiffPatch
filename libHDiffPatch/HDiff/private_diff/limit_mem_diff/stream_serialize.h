@@ -230,12 +230,14 @@ struct TDiffStream{
     hpatch_StreamPos_t pushStream(const hpatch_TStreamInput* stream,
                                   const hdiff_TCompress*     compressPlugin,
                                   const TPlaceholder&        update_compress_sizePos,
-                                  bool isMustCompress=false,const hpatch_StreamPos_t cancelSizeOnCancelCompress=0);
+                                  bool isMustCompress=false,const hpatch_StreamPos_t cancelSizeOnCancelCompress=0,
+                                  bool* out_isCanceledCompress=0);
     hpatch_StreamPos_t pushStream(const hpatch_TStreamInput* stream,
                                   const hdiff_TCompress*     compressPlugin,
-                                  bool isMustCompress=false,const hpatch_StreamPos_t cancelSizeOnCancelCompress=0){
+                                  bool isMustCompress=false,const hpatch_StreamPos_t cancelSizeOnCancelCompress=0,
+                                  bool* out_isCanceledCompress=0){
                 TPlaceholder nullPos(0,0); return pushStream(stream,compressPlugin,nullPos,
-                                                             isMustCompress,cancelSizeOnCancelCompress); }
+                                                    isMustCompress,cancelSizeOnCancelCompress,out_isCanceledCompress); }
     hpatch_StreamPos_t pushStream(const hpatch_TStreamInput* stream){
                 _pushStream(stream); return stream->streamSize; }
     hpatch_StreamPos_t getWritedPos()const{ return writePos; }

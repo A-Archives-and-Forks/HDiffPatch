@@ -2311,11 +2311,13 @@ void serialize_window_diff(const hpatch_TStreamInput* newStream,const hpatch_TSt
     }
 
     //push compressed window data stream
-    hpatch_StreamPos_t wrtitedWindowDataSize=outDiff.pushStream(&windowDiffStream,compressPlugin);
+    bool isCanceledCompress=false;
+    hpatch_StreamPos_t wrtitedWindowDataSize=outDiff.pushStream(&windowDiffStream,compressPlugin,
+                                                                false,0, &isCanceledCompress);
     if (checksumByteSize>0)
         checksumOutDiff.setIsChecksuming(false);
     if (compressPlugin)
-        outDiff.packUInt_update(compressedSize_ph,wrtitedWindowDataSize);
+        outDiff.packUInt_update(compressedSize_ph,isCanceledCompress?0:wrtitedWindowDataSize);
 
     if (checksumByteSize>0){
         {//checksumOld: finalize
