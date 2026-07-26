@@ -179,6 +179,9 @@ else
               $(BROTLI_PATH)/dec/state.c
 endif
 
+ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
+    DEF_FLAGS += -mfpu=vfpv3-d16 -fno-tree-vectorize
+endif
 
 LOCAL_SRC_FILES := $(Src_Files)
 LOCAL_LDLIBS    := $(LINK_FLAGS)
