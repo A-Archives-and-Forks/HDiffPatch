@@ -1,5 +1,5 @@
 # [HDiffPatch]
-[![release](https://img.shields.io/badge/release-v5.1.1-blue.svg)](https://github.com/sisong/HDiffPatch/releases) 
+[![release](https://img.shields.io/badge/release-v5.1.2-blue.svg)](https://github.com/sisong/HDiffPatch/releases) 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/sisong/HDiffPatch/blob/master/LICENSE) 
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blue.svg)](https://github.com/sisong/HDiffPatch/pulls)
 [![+issue Welcome](https://img.shields.io/github/issues-raw/sisong/HDiffPatch?color=green&label=%2Bissue%20welcome)](https://github.com/sisong/HDiffPatch/issues)   
@@ -185,8 +185,10 @@ options:
         -c-lzma[-{0..9}[-dictSize]]     DEFAULT level 7
             dictSize can like 4096 or 4k or 4m or 128m etc..., DEFAULT 8m
             support run by 2-thread parallel.
-        -c-lzma2[-{0..9}[-dictSize]]    DEFAULT level 7
-            dictSize can like 4096 or 4k or 4m or 128m etc..., DEFAULT 8m
+        -c-lzma2[-{0..9}[-dictSize[-blockSize]]]    DEFAULT level 7
+            dictSize can like 4096 or 4k or 4m or 128m etc..., DEFAULT 8m;
+            1m<=blockSize<=256m, DEFAULT 0 (AUTO) ...;
+              recommend blockSize==dictSize when need decompress by multi-thread;
             support run by multi-thread parallel, fast!
             NOTE: code not compatible with it compressed by -c-lzma!
         -c-zstd[-{0..22}[-dictBits]]    DEFAULT level 20
@@ -283,6 +285,9 @@ options:
       if parallelThreadNumber>1 then open multi-thread Parallel mode;
       now support window diffData(created by hdiffz -WD) and single compressed diffData(created by hdiffz -SD);
       can set 1..5, DEFAULT -p-1!
+  -p-dec-decThreadNumber
+      if decThreadNumber>1 then open multi-thread decompress mode, DEFAULT -p-dec-1!
+      now only support lzma2 with blockSize; NOTE: need more memory!
   -C-checksumSets
       set Checksum data for window patch & directory patch & VCDIFF patch, DEFAULT -C-new-copy;
       checksumSets support (can choose multiple):

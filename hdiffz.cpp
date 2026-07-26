@@ -298,8 +298,8 @@ static void printUsage(){
 #ifdef _CompressPlugin_lzma2
            "        -c-lzma2[-{0..9}[-dictSize[-blockSize]]]    DEFAULT level 7\n"
            "            dictSize can like 4096 or 4k or 4m or 128m etc..., DEFAULT 8m;\n"
-               "        1m<=blockSize<=256m, DEFAULT 0 (AUTO) ...;\n"
-               "          recommend blockSize==dictSize when need decompress by multi-thread;\n"
+           "            1m<=blockSize<=256m, DEFAULT 0 (AUTO) ...;\n"
+           "              recommend blockSize==dictSize when need decompress by multi-thread;\n"
 #   if (_IS_USED_MULTITHREAD)
            "            support run by multi-thread parallel, fast!\n"
 #   endif
