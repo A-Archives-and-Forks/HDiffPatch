@@ -462,6 +462,7 @@ int hpatch_cmd_line(int argc, const char * argv[]){
     hpatch_BOOL isPrintFileInfo=_kNULL_VALUE;
     hpatch_BOOL isLoadOldAll=_kNULL_VALUE;
     hpatch_BOOL isForceOverwrite=_kNULL_VALUE;
+    hpatch_BOOL isInplaceMode=_kNULL_VALUE;
     hpatch_BOOL isOutputHelp=_kNULL_VALUE;
     hpatch_BOOL isOutputVersion=_kNULL_VALUE;
     hpatch_BOOL isOldPathInputEmpty=_kNULL_VALUE;
@@ -576,9 +577,15 @@ int hpatch_cmd_line(int argc, const char * argv[]){
             } break;
 #endif
             case 'i':{
-                _options_check((isPrintFileInfo==_kNULL_VALUE)&&(op[2]=='n')&&(op[3]=='f')
-                               &&(op[4]=='o')&&(op[5]=='\0'),"-info");
-                isPrintFileInfo=hpatch_TRUE;
+                if ((op[2]=='n')&&(op[3]=='p')&&(op[4]=='l')&&(op[5]=='a')
+                    &&(op[6]=='c')&&(op[7]=='e')&&(op[8]=='\0')){
+                    _options_check(isInplaceMode==_kNULL_VALUE,"-inplace");
+                    isInplaceMode=hpatch_TRUE;
+                }else{
+                    _options_check((isPrintFileInfo==_kNULL_VALUE)&&(op[2]=='n')&&(op[3]=='f')
+                                   &&(op[4]=='o')&&(op[5]=='\0'),"-info");
+                    isPrintFileInfo=hpatch_TRUE;
+                }
             } break;
             case '?':
             case 'h':{
@@ -601,6 +608,8 @@ int hpatch_cmd_line(int argc, const char * argv[]){
         isOutputVersion=hpatch_FALSE;
     if (isForceOverwrite==_kNULL_VALUE)
         isForceOverwrite=hpatch_FALSE;
+    if (isInplaceMode==_kNULL_VALUE)
+        isInplaceMode=hpatch_FALSE;
     if (isPrintFileInfo==_kNULL_VALUE)
         isPrintFileInfo=hpatch_FALSE;
     if (isRunSFX==_kNULL_VALUE)
@@ -808,11 +817,18 @@ int hpatch_cmd_line(int argc, const char * argv[]){
                           HPATCH_PATHTYPE_ERROR,"can not use directory overwrite oldFile");
             _return_check(hpatch_getTempPathName(outNewPath,newTempDir,newTempDir+hpatch_kPathMaxSize),
                           HPATCH_TEMPPATH_ERROR,"getTempPathName(outNewPath)");
-            printf("NOTE: all in outNewPath temp directory will be move to oldDirectory after patch!\n");
+            if (isInplaceMode)
+                printf("NOTE: only changed files in outNewPath temp directory will be moved to oldDirectory after patch!\n");
+            else
+                printf("NOTE: all in outNewPath temp directory will be move to oldDirectory after patch!\n");
             result=hpatch_dir(oldPath,diffFileName,newTempDir,isLoadOldAll,patchCacheSize,kMaxOpenFileNumber,
-                              &checksumSet,&tempDirPatchListener,diffDataOffset,diffDataSize,threadNum,dec_threadNum);
+                              &checksumSet,isInplaceMode?&inplacePatchListener:&tempDirPatchListener,
+                              diffDataOffset,diffDataSize,threadNum,dec_threadNum);
             if (result==HPATCH_SUCCESS){
-                printf("all in outNewPath temp directory moved to oldDirectory!\n");
+                if (isInplaceMode)
+                    printf("changed files in outNewPath temp directory moved to oldDirectory!\n");
+                else
+                    printf("all in outNewPath temp directory moved to oldDirectory!\n");
             }else if(!hpatch_isPathNotExist(newTempDir)){
                 printf("WARNING: not remove temp directory \"");
                 _log_info_utf8(newTempDir); printf("\"\n");
