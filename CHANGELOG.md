@@ -2,7 +2,11 @@
 
 full changelog at: https://github.com/sisong/HDiffPatch/commits   
 
-## [v5.1.2](https://github.com/sisong/HDiffPatch/tree/v5.1.1) - 2026-07-26
+## [v5.1.3](https://github.com/sisong/HDiffPatch/tree/v5.1.3) - 2026-07-31
+### Added
+* optimize dir_patch inplace-move oldFiles; by contributor [sparklelcm333](https://github.com/sparklelcm333);
+
+## [v5.1.2](https://github.com/sisong/HDiffPatch/tree/v5.1.2) - 2026-07-26
 ### Fixed
 * fix a patch fail, at serialize WD when compress 'fail' and cancel;
 
