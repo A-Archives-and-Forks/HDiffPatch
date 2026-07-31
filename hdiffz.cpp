@@ -1396,11 +1396,11 @@ int hdiff_cmd_line(int argc, const char * argv[]){
         }
         if (isUseDirDiff){
 #ifdef _ChecksumPlugin_fadler64
-            if (isSetChecksum==hpatch_FALSE)
+            if ((checksumPlugin==0) && (!isSetChecksum))
                 checksumPlugin=&fadler64ChecksumPlugin; //DEFAULT
 #else
 #   ifdef _ChecksumPlugin_crc32
-            if (isSetChecksum==hpatch_FALSE)
+            if ((checksumPlugin==0) && (!isSetChecksum))
                 checksumPlugin=&crc32ChecksumPlugin; //DEFAULT
 #   endif
 #endif
@@ -1440,11 +1440,11 @@ int hdiff_cmd_line(int argc, const char * argv[]){
         _options_check(ignoreNewPathList.empty(),"-g-new unsupport run with create manifest file mode");
 
 #ifdef _ChecksumPlugin_fadler64
-        if (isSetChecksum==hpatch_FALSE)
+        if ((checksumPlugin==0) && (!isSetChecksum))
             checksumPlugin=&fadler64ChecksumPlugin; //DEFAULT
 #else
 #   ifdef _ChecksumPlugin_crc32
-        if (isSetChecksum==hpatch_FALSE)
+        if ((checksumPlugin==0) && (!isSetChecksum))
             checksumPlugin=&crc32ChecksumPlugin; //DEFAULT
 #   endif
 #endif
