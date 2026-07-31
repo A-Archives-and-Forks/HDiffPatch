@@ -119,7 +119,7 @@ static IHPatchDirListener defaultPatchDirlistener={{0,_makeNewDir,_copySameFile,
         hpatch_FileError_t fileError; 
     } IDirPathMove;
     
-    static hpatch_BOOL _moveNewToOld(IDirPathMove* dirPathMove) {
+    static hpatch_BOOL _moveNewToOld(IDirPathMove* dirPathMove,const unsigned char* isKeepOlds,const unsigned char* isSkipNews){
         char _tmpPath[hpatch_kPathMaxSize];
         char _tmpDstPath[hpatch_kPathMaxSize];
         hpatch_BOOL result=hpatch_TRUE;
@@ -130,7 +130,9 @@ static IHPatchDirListener defaultPatchDirlistener={{0,_makeNewDir,_copySameFile,
         //delete dir in dstPathList; //not check
         for (i=dstPathList->pathCount; i>0; --i) {
             size_t dstPathIndex=i-1;
-            const char* dstPath=dstPathList->getPathNameByIndex(dstPathList->import,dstPathIndex,_tmpPath,_tmpPath+sizeof(_tmpPath));
+            const char* dstPath;
+            if (isKeepOlds&&isKeepOlds[dstPathIndex]) continue;
+            dstPath=dstPathList->getPathNameByIndex(dstPathList->import,dstPathIndex,_tmpPath,_tmpPath+sizeof(_tmpPath));
             if (dstPath==0) continue;
             if (!hpatch_getIsDirName(dstPath)){
                 if (!_tryRemovePath(dstPath)){
@@ -144,7 +146,9 @@ static IHPatchDirListener defaultPatchDirlistener={{0,_makeNewDir,_copySameFile,
         //move all files and dirs in srcDir to dstDir;
         for (i=0; i<srcPathList->pathCount; ++i) {//make dirs to dstDir
             size_t srcPathIndex=i;
-            const char* srcPath=srcPathList->getPathNameByIndex(srcPathList->import,srcPathIndex,_tmpPath,_tmpPath+sizeof(_tmpPath));
+            const char* srcPath;
+            if (isSkipNews&&isSkipNews[srcPathIndex]) continue;
+            srcPath=srcPathList->getPathNameByIndex(srcPathList->import,srcPathIndex,_tmpPath,_tmpPath+sizeof(_tmpPath));
             if (srcPath==0) { result=hpatch_FALSE; continue; }
             if (hpatch_getIsDirName(srcPath)){
                 const char* dstDir=dirPathMove->getDstPathBySrcPath(dirPathMove->importMove,srcPath,_tmpDstPath,_tmpDstPath+sizeof(_tmpDstPath));
@@ -154,7 +158,9 @@ static IHPatchDirListener defaultPatchDirlistener={{0,_makeNewDir,_copySameFile,
         }
         for (i=srcPathList->pathCount; i>0; --i) {//move files to dstDir and remove dirs in srcDir
             size_t srcPathIndex=i-1;
-            const char* srcPath=srcPathList->getPathNameByIndex(srcPathList->import,srcPathIndex,_tmpPath,_tmpPath+sizeof(_tmpPath));
+            const char* srcPath;
+            if (isSkipNews&&isSkipNews[srcPathIndex]) continue;
+            srcPath=srcPathList->getPathNameByIndex(srcPathList->import,srcPathIndex,_tmpPath,_tmpPath+sizeof(_tmpPath));
             if (srcPath==0) { result=hpatch_FALSE; continue; }
             if (hpatch_getIsDirName(srcPath)){
                 hpatch_removeDir(srcPath);
@@ -213,6 +219,8 @@ static hpatch_BOOL _tempDirPatchFinish(IHPatchDirListener* self,hpatch_BOOL isPa
     char _tmpPath1[hpatch_kPathMaxSize];
     hpatch_BOOL  result=hpatch_TRUE;
     TDirPatcher* dirPatcher=(TDirPatcher*)self->listenerImport;
+    unsigned char* isKeepOlds=0; //size:oldPathCount, 1==the old file stays in oldDir
+    unsigned char* isSkipNews=0; //size:newPathCount, 1==the new path has no file in newTempDir
     size_t       i;
     hpatch_BOOL  isInitSameRefError=isPatchSuccess?(!TDirPatcher_initOldSameRefCount(dirPatcher)):hpatch_FALSE;
     if (isInitSameRefError){
@@ -220,6 +228,12 @@ static hpatch_BOOL _tempDirPatchFinish(IHPatchDirListener* self,hpatch_BOOL isPa
         result=hpatch_FALSE;
     }
     if (isPatchSuccess){
+        isKeepOlds=(unsigned char*)malloc(dirPatcher->dirDiffHead.oldPathCount+dirPatcher->dirDiffHead.newPathCount);
+        if (isKeepOlds){
+            memset(isKeepOlds,0,dirPatcher->dirDiffHead.oldPathCount+dirPatcher->dirDiffHead.newPathCount);
+            isSkipNews=isKeepOlds+dirPatcher->dirDiffHead.oldPathCount;
+        }
+
         //move(+ some must copy) same to newTempDir from oldDir;
         for (i=dirPatcher->dirDiffHead.sameFilePairCount; i>0; --i) {
             size_t sameIndex=i-1;
@@ -235,7 +249,12 @@ static hpatch_BOOL _tempDirPatchFinish(IHPatchDirListener* self,hpatch_BOOL isPa
                     hpatch_printStdErrPath_utf8(newPath); LOG_ERR("\"  ERROR!\n");
                 }
             }else{
-                if (!hpatch_moveFile(oldPath,newPath)){//move old to new
+                const hpatch_TSameFilePair* samePair=&dirPatcher->_newDir.dataSamePairList[sameIndex];
+                if (isKeepOlds&&(0==strcmp(dirPatcher->oldUtf8PathList[samePair->oldIndex],//same name & data, skip
+                                           dirPatcher->_newDir.newUtf8PathList[samePair->newIndex]))){
+                    isKeepOlds[samePair->oldIndex]=1;
+                    isSkipNews[samePair->newIndex]=1;
+                }else if (!hpatch_moveFile(oldPath,newPath)){//move old to new
                     result=hpatch_FALSE;
                     LOG_ERR("can't move new file to newTempDir from same old file \"");
                     hpatch_printStdErrPath_utf8(newPath); LOG_ERR("\"  ERROR!\n");
@@ -251,7 +270,7 @@ static hpatch_BOOL _tempDirPatchFinish(IHPatchDirListener* self,hpatch_BOOL isPa
             dirPathMove.getDstPathBySrcPath=(IDirPathMove_getDstPathBySrcPath)TDirPatcher_getOldPathByNewPath;
             TDirPatcher_getNewDirPathList(dirPatcher,&dirPathMove.srcPathList);
             TDirPatcher_getOldDirPathList(dirPatcher,&dirPathMove.dstPathList);
-            if (!_moveNewToOld(&dirPathMove)){
+            if (!_moveNewToOld(&dirPathMove,isKeepOlds,isSkipNews)){
                 mix_ferr(self->fileError,dirPathMove.fileError);
                 result=hpatch_FALSE;
             }
@@ -280,6 +299,7 @@ static hpatch_BOOL _tempDirPatchFinish(IHPatchDirListener* self,hpatch_BOOL isPa
             hpatch_printStdErrPath_utf8(newTempDir); LOG_ERR("\"  ERROR!\n");
         }
     }
+    if (isKeepOlds) free(isKeepOlds);
     return result;
 }
 
@@ -288,7 +308,8 @@ static hpatch_BOOL _tempDirPatchFinish(IHPatchDirListener* self,hpatch_BOOL isPa
 //    make new dir to newTempDir
 //    checksum same file
 // 2. if patch ok then  {
-//        move(+ some must copy) same to newTempDir from oldDir;
+//        move(+ some must copy) same to newTempDir from oldDir
+//            (same files with unchanged relative path stay in oldDir);
 //        move new to old             {
 //            delete file in oldPathList; //WARNING
 //            delete dir in oldPathList; //not check
